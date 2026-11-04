@@ -1,0 +1,1245 @@
+{
+  "$defs": {
+    "AudioStream": {
+      "additionalProperties": true,
+      "properties": {
+        "codec": {
+          "title": "Codec",
+          "type": "string"
+        },
+        "sample_rate": {
+          "title": "Sample Rate",
+          "type": "integer"
+        },
+        "channels": {
+          "title": "Channels",
+          "type": "integer"
+        },
+        "start_ms": {
+          "default": 0,
+          "title": "Start Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "codec",
+        "sample_rate",
+        "channels"
+      ],
+      "title": "AudioStream",
+      "type": "object"
+    },
+    "DetectedFile": {
+      "additionalProperties": true,
+      "properties": {
+        "file_name": {
+          "title": "File Name",
+          "type": "string"
+        },
+        "signals": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Signals",
+          "type": "array"
+        }
+      },
+      "required": [
+        "file_name"
+      ],
+      "title": "DetectedFile",
+      "type": "object"
+    },
+    "Detection": {
+      "additionalProperties": true,
+      "properties": {
+        "mode": {
+          "enum": [
+            "auto",
+            "manual"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "camera": {
+          "$ref": "#/$defs/DetectedFile"
+        },
+        "screen": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DetectedFile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ignored": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ignored",
+          "type": "array"
+        },
+        "ambiguity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ambiguity"
+        }
+      },
+      "required": [
+        "mode",
+        "camera"
+      ],
+      "title": "Detection",
+      "type": "object"
+    },
+    "DiffOp": {
+      "additionalProperties": true,
+      "properties": {
+        "op": {
+          "enum": [
+            "missing",
+            "extra",
+            "replace"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "other_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Other Text"
+        }
+      },
+      "required": [
+        "op",
+        "text"
+      ],
+      "title": "DiffOp",
+      "type": "object"
+    },
+    "Drift": {
+      "additionalProperties": true,
+      "properties": {
+        "measured": {
+          "title": "Measured",
+          "type": "boolean"
+        },
+        "window_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window Ms"
+        },
+        "ppm": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ppm"
+        },
+        "max_dev_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Dev Ms"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "warn",
+            "not_measured"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "samples": {
+          "items": {
+            "$ref": "#/$defs/DriftSample"
+          },
+          "title": "Samples",
+          "type": "array"
+        }
+      },
+      "required": [
+        "measured",
+        "status"
+      ],
+      "title": "Drift",
+      "type": "object"
+    },
+    "DriftSample": {
+      "additionalProperties": true,
+      "properties": {
+        "camera_ms": {
+          "title": "Camera Ms",
+          "type": "integer"
+        },
+        "origin_ms": {
+          "title": "Origin Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "camera_ms",
+        "origin_ms"
+      ],
+      "title": "DriftSample",
+      "type": "object"
+    },
+    "Engine": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "Engine",
+      "type": "object"
+    },
+    "EngineWarning": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "message"
+      ],
+      "title": "EngineWarning",
+      "type": "object"
+    },
+    "PauseSettings": {
+      "additionalProperties": true,
+      "properties": {
+        "threshold_ms": {
+          "minimum": 0,
+          "title": "Threshold Ms",
+          "type": "integer"
+        },
+        "margin_ms": {
+          "minimum": 0,
+          "title": "Margin Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "threshold_ms",
+        "margin_ms"
+      ],
+      "title": "PauseSettings",
+      "type": "object"
+    },
+    "Project": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Project",
+      "type": "object"
+    },
+    "Proposal": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "repeat_choice",
+          "default": "repeat_choice",
+          "title": "Type",
+          "type": "string"
+        },
+        "take_id": {
+          "title": "Take Id",
+          "type": "string"
+        },
+        "rule": {
+          "title": "Rule",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "take_id",
+        "rule",
+        "reason"
+      ],
+      "title": "Proposal",
+      "type": "object"
+    },
+    "RepeatGroup": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "proposed",
+            "ambiguous"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "similarity": {
+          "$ref": "#/$defs/Similarity"
+        },
+        "compared_to": {
+          "description": "Presa di confronto per similarità e diff: la proposta, o la più lunga se ambiguo.",
+          "title": "Compared To",
+          "type": "string"
+        },
+        "takes": {
+          "items": {
+            "$ref": "#/$defs/Take"
+          },
+          "minItems": 2,
+          "title": "Takes",
+          "type": "array"
+        },
+        "proposal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Proposal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "similarity",
+        "compared_to",
+        "takes"
+      ],
+      "title": "RepeatGroup",
+      "type": "object"
+    },
+    "RepeatSettings": {
+      "additionalProperties": true,
+      "properties": {
+        "unit_gap_ms": {
+          "minimum": 0,
+          "title": "Unit Gap Ms",
+          "type": "integer"
+        },
+        "min_tokens": {
+          "minimum": 1,
+          "title": "Min Tokens",
+          "type": "integer"
+        },
+        "similarity_min": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Similarity Min",
+          "type": "number"
+        },
+        "complete_coverage": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Complete Coverage",
+          "type": "number"
+        }
+      },
+      "required": [
+        "unit_gap_ms",
+        "min_tokens",
+        "similarity_min",
+        "complete_coverage"
+      ],
+      "title": "RepeatSettings",
+      "type": "object"
+    },
+    "Run": {
+      "additionalProperties": true,
+      "properties": {
+        "range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "steps": {
+          "additionalProperties": {
+            "$ref": "#/$defs/StepRecord"
+          },
+          "title": "Steps",
+          "type": "object"
+        }
+      },
+      "title": "Run",
+      "type": "object"
+    },
+    "Segment": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "keep",
+            "remove"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "speech",
+            "dead_pause"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "type",
+        "start_ms",
+        "end_ms",
+        "reason"
+      ],
+      "title": "Segment",
+      "type": "object"
+    },
+    "Settings": {
+      "additionalProperties": true,
+      "properties": {
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        },
+        "profile_source": {
+          "enum": [
+            "auto",
+            "cli"
+          ],
+          "title": "Profile Source",
+          "type": "string"
+        },
+        "pauses": {
+          "$ref": "#/$defs/PauseSettings"
+        },
+        "repeats": {
+          "$ref": "#/$defs/RepeatSettings"
+        },
+        "transcription": {
+          "$ref": "#/$defs/TranscriptionSettings"
+        },
+        "sync": {
+          "$ref": "#/$defs/SyncSettings"
+        }
+      },
+      "required": [
+        "profile",
+        "profile_source",
+        "pauses",
+        "repeats",
+        "transcription",
+        "sync"
+      ],
+      "title": "Settings",
+      "type": "object"
+    },
+    "Similarity": {
+      "additionalProperties": true,
+      "properties": {
+        "min": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Min",
+          "type": "number"
+        },
+        "mean": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Mean",
+          "type": "number"
+        }
+      },
+      "required": [
+        "min",
+        "mean"
+      ],
+      "title": "Similarity",
+      "type": "object"
+    },
+    "Source": {
+      "additionalProperties": true,
+      "properties": {
+        "file_name": {
+          "title": "File Name",
+          "type": "string"
+        },
+        "path_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path Hint"
+        },
+        "fingerprint": {
+          "title": "Fingerprint",
+          "type": "string"
+        },
+        "container": {
+          "title": "Container",
+          "type": "string"
+        },
+        "duration_ms": {
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "video": {
+          "$ref": "#/$defs/VideoStream"
+        },
+        "audio": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioStream"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "audio_policy": {
+          "enum": [
+            "reference",
+            "sync_only_mute"
+          ],
+          "title": "Audio Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_name",
+        "fingerprint",
+        "container",
+        "duration_ms",
+        "video",
+        "audio_policy"
+      ],
+      "title": "Source",
+      "type": "object"
+    },
+    "Sources": {
+      "additionalProperties": true,
+      "properties": {
+        "camera": {
+          "$ref": "#/$defs/Source"
+        },
+        "screen": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Source"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "camera"
+      ],
+      "title": "Sources",
+      "type": "object"
+    },
+    "Stats": {
+      "additionalProperties": true,
+      "properties": {
+        "raw_ms": {
+          "title": "Raw Ms",
+          "type": "integer"
+        },
+        "kept_ms": {
+          "title": "Kept Ms",
+          "type": "integer"
+        },
+        "removed_ms": {
+          "title": "Removed Ms",
+          "type": "integer"
+        },
+        "repeat_groups": {
+          "minimum": 0,
+          "title": "Repeat Groups",
+          "type": "integer"
+        },
+        "ambiguous_groups": {
+          "minimum": 0,
+          "title": "Ambiguous Groups",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "raw_ms",
+        "kept_ms",
+        "removed_ms",
+        "repeat_groups",
+        "ambiguous_groups"
+      ],
+      "title": "Stats",
+      "type": "object"
+    },
+    "StepRecord": {
+      "additionalProperties": true,
+      "properties": {
+        "input_hash": {
+          "title": "Input Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "input_hash"
+      ],
+      "title": "StepRecord",
+      "type": "object"
+    },
+    "Sync": {
+      "additionalProperties": true,
+      "properties": {
+        "status": {
+          "enum": [
+            "pending",
+            "not_applicable",
+            "ok",
+            "low_confidence",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Method"
+        },
+        "screen_origin_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Istante sull'asse camera in cui cade lo 0 del file schermo.",
+          "title": "Screen Origin Ms"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "mapping": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mapping"
+        },
+        "drift": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Drift"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "Sync",
+      "type": "object"
+    },
+    "SyncSettings": {
+      "additionalProperties": true,
+      "properties": {
+        "max_lag_ms": {
+          "minimum": 0,
+          "title": "Max Lag Ms",
+          "type": "integer"
+        },
+        "drift_window_ms": {
+          "exclusiveMinimum": 0,
+          "title": "Drift Window Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_lag_ms",
+        "drift_window_ms"
+      ],
+      "title": "SyncSettings",
+      "type": "object"
+    },
+    "Take": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "index": {
+          "minimum": 1,
+          "title": "Index",
+          "type": "integer"
+        },
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "word_span": {
+          "description": "Prima e ultima parola della presa.",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Word Span",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "false_start"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "coverage": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Coverage",
+          "type": "number"
+        },
+        "similarity_to_compared": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Similarity To Compared",
+          "type": "number"
+        },
+        "diff_vs_compared": {
+          "items": {
+            "$ref": "#/$defs/DiffOp"
+          },
+          "title": "Diff Vs Compared",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "index",
+        "start_ms",
+        "end_ms",
+        "text",
+        "word_span",
+        "status",
+        "coverage",
+        "similarity_to_compared"
+      ],
+      "title": "Take",
+      "type": "object"
+    },
+    "TimeBase": {
+      "additionalProperties": true,
+      "properties": {
+        "unit": {
+          "const": "ms",
+          "default": "ms",
+          "title": "Unit",
+          "type": "string"
+        },
+        "master": {
+          "const": "camera",
+          "default": "camera",
+          "title": "Master",
+          "type": "string"
+        }
+      },
+      "title": "TimeBase",
+      "type": "object"
+    },
+    "TimeRange": {
+      "additionalProperties": true,
+      "properties": {
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "title": "End Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms"
+      ],
+      "title": "TimeRange",
+      "type": "object"
+    },
+    "Transcript": {
+      "additionalProperties": true,
+      "properties": {
+        "cache_key": {
+          "title": "Cache Key",
+          "type": "string"
+        },
+        "audio_range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "word_count": {
+          "minimum": 0,
+          "title": "Word Count",
+          "type": "integer"
+        },
+        "language_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language Code"
+        },
+        "language_probability": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language Probability"
+        }
+      },
+      "required": [
+        "cache_key",
+        "word_count"
+      ],
+      "title": "Transcript",
+      "type": "object"
+    },
+    "TranscriptionSettings": {
+      "additionalProperties": true,
+      "properties": {
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "language": {
+          "title": "Language",
+          "type": "string"
+        },
+        "audio_events": {
+          "enum": [
+            "keep",
+            "ignore"
+          ],
+          "title": "Audio Events",
+          "type": "string"
+        },
+        "dead_events": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dead Events",
+          "type": "array"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "language",
+        "audio_events"
+      ],
+      "title": "TranscriptionSettings",
+      "type": "object"
+    },
+    "VideoStream": {
+      "additionalProperties": true,
+      "properties": {
+        "codec": {
+          "title": "Codec",
+          "type": "string"
+        },
+        "coded_width": {
+          "title": "Coded Width",
+          "type": "integer"
+        },
+        "coded_height": {
+          "title": "Coded Height",
+          "type": "integer"
+        },
+        "rotation": {
+          "default": 0,
+          "title": "Rotation",
+          "type": "integer"
+        },
+        "display_width": {
+          "title": "Display Width",
+          "type": "integer"
+        },
+        "display_height": {
+          "title": "Display Height",
+          "type": "integer"
+        },
+        "orientation": {
+          "enum": [
+            "landscape",
+            "portrait",
+            "square"
+          ],
+          "title": "Orientation",
+          "type": "string"
+        },
+        "fps": {
+          "title": "Fps",
+          "type": "number"
+        },
+        "fps_mode": {
+          "enum": [
+            "cfr",
+            "vfr"
+          ],
+          "title": "Fps Mode",
+          "type": "string"
+        },
+        "start_ms": {
+          "default": 0,
+          "title": "Start Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "codec",
+        "coded_width",
+        "coded_height",
+        "display_width",
+        "display_height",
+        "orientation",
+        "fps",
+        "fps_mode"
+      ],
+      "title": "VideoStream",
+      "type": "object"
+    },
+    "Word": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "kind": {
+          "default": "word",
+          "enum": [
+            "word",
+            "audio_event"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "logprob": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logprob"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "start_ms",
+        "end_ms"
+      ],
+      "title": "Word",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "engine": {
+      "$ref": "#/$defs/Engine"
+    },
+    "project": {
+      "$ref": "#/$defs/Project"
+    },
+    "time_base": {
+      "$ref": "#/$defs/TimeBase"
+    },
+    "run": {
+      "$ref": "#/$defs/Run"
+    },
+    "detection": {
+      "$ref": "#/$defs/Detection"
+    },
+    "sources": {
+      "$ref": "#/$defs/Sources"
+    },
+    "sync": {
+      "$ref": "#/$defs/Sync"
+    },
+    "settings": {
+      "$ref": "#/$defs/Settings"
+    },
+    "transcript": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Transcript"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "words": {
+      "items": {
+        "$ref": "#/$defs/Word"
+      },
+      "title": "Words",
+      "type": "array"
+    },
+    "segments": {
+      "items": {
+        "$ref": "#/$defs/Segment"
+      },
+      "title": "Segments",
+      "type": "array"
+    },
+    "repeat_groups": {
+      "items": {
+        "$ref": "#/$defs/RepeatGroup"
+      },
+      "title": "Repeat Groups",
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "$ref": "#/$defs/EngineWarning"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "stats": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Stats"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "engine",
+    "project",
+    "detection",
+    "sources",
+    "sync",
+    "settings"
+  ],
+  "title": "autocut timeline",
+  "type": "object"
+}

@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "engine": { "name": "autocut", "version": "0.1.0" },
+  "project": { "name": "episodio-12" },
+  "time_base": { "unit": "ms", "master": "camera" },
+  "run": {
+    "range": null,
+    "steps": {
+      "ingest": { "input_hash": "sha256:aaa" },
+      "transcribe": { "input_hash": "sha256:bbb" }
+    }
+  },
+  "detection": {
+    "mode": "auto",
+    "camera": {
+      "file_name": "IMG_4821.MOV",
+      "signals": ["apple.quicktime.make=Apple", "model=iPhone", "3840x2160", "name~IMG_\\d+"]
+    },
+    "screen": {
+      "file_name": "2026-11-04 15-22-10.mkv",
+      "signals": ["container=mkv", "name~YYYY-MM-DD HH-MM-SS", "no_mobile_metadata", "1920x1080"]
+    },
+    "ignored": [],
+    "ambiguity": null
+  },
+  "sources": {
+    "camera": {
+      "file_name": "IMG_4821.MOV",
+      "path_hint": "D:/raw/ep12/IMG_4821.MOV",
+      "fingerprint": "sha256:ccc",
+      "container": "mov",
+      "duration_ms": 5200,
+      "video": {
+        "codec": "hevc",
+        "coded_width": 3840,
+        "coded_height": 2160,
+        "rotation": 0,
+        "display_width": 3840,
+        "display_height": 2160,
+        "orientation": "landscape",
+        "fps": 60.0,
+        "fps_mode": "cfr",
+        "start_ms": 0
+      },
+      "audio": { "codec": "aac", "sample_rate": 48000, "channels": 2, "start_ms": 0 },
+      "audio_policy": "reference"
+    },
+    "screen": {
+      "file_name": "2026-11-04 15-22-10.mkv",
+      "path_hint": "D:/raw/ep12/2026-11-04 15-22-10.mkv",
+      "fingerprint": "sha256:ddd",
+      "container": "mkv",
+      "duration_ms": 14000,
+      "video": {
+        "codec": "h264",
+        "coded_width": 1920,
+        "coded_height": 1080,
+        "rotation": 0,
+        "display_width": 1920,
+        "display_height": 1080,
+        "orientation": "landscape",
+        "fps": 60.0,
+        "fps_mode": "cfr",
+        "start_ms": 0
+      },
+      "audio": { "codec": "aac", "sample_rate": 48000, "channels": 2, "start_ms": 0 },
+      "audio_policy": "sync_only_mute"
+    }
+  },
+  "sync": {
+    "status": "ok",
+    "method": "gcc-phat",
+    "screen_origin_ms": -8420,
+    "confidence": 0.93,
+    "mapping": "screen_ms = (camera_ms - screen_origin_ms) * (1 + drift.ppm*1e-6)",
+    "drift": {
+      "measured": false,
+      "window_ms": null,
+      "ppm": null,
+      "max_dev_ms": null,
+      "status": "not_measured",
+      "samples": []
+    }
+  },
+  "settings": {
+    "profile": "long",
+    "profile_source": "auto",
+    "pauses": { "threshold_ms": 1000, "margin_ms": 150 },
+    "repeats": {
+      "unit_gap_ms": 400,
+      "min_tokens": 3,
+      "similarity_min": 0.6,
+      "complete_coverage": 0.85
+    },
+    "transcription": {
+      "provider": "elevenlabs",
+      "model": "scribe_v2",
+      "language": "ita",
+      "audio_events": "keep",
+      "dead_events": ["esita", "tosse"]
+    },
+    "sync": { "max_lag_ms": 120000, "drift_window_ms": 60000 }
+  },
+  "transcript": { "cache_key": "sha256:eee", "audio_range": null, "word_count": 5, "language_code": "ita", "language_probability": 0.99 },
+  "words": [
+    { "id": "w000001", "text": "Ciao", "start_ms": 1200, "end_ms": 1480, "kind": "word", "logprob": null },
+    { "id": "w000002", "text": "a", "start_ms": 1520, "end_ms": 1600, "kind": "word", "logprob": null },
+    { "id": "w000003", "text": "Ciao", "start_ms": 3100, "end_ms": 3420, "kind": "word", "logprob": null },
+    { "id": "w000004", "text": "a", "start_ms": 3460, "end_ms": 3540, "kind": "word", "logprob": null },
+    { "id": "w000005", "text": "tutti", "start_ms": 3580, "end_ms": 4050, "kind": "word", "logprob": null }
+  ],
+  "segments": [
+    {
+      "id": "gap:^-w000001",
+      "state": "remove",
+      "type": "dead_pause",
+      "start_ms": 0,
+      "end_ms": 1050,
+      "reason": "silenzio iniziale 1200 ms >= soglia 1000 ms; margine 150 ms prima della parola",
+      "data": { "gap_ms": 1200, "threshold_ms": 1000 }
+    },
+    {
+      "id": "seg:w000001-w000002",
+      "state": "keep",
+      "type": "speech",
+      "start_ms": 1050,
+      "end_ms": 1750,
+      "reason": "parlato (margine 150 ms per lato)",
+      "data": { "word_span": ["w000001", "w000002"] }
+    },
+    {
+      "id": "gap:w000002-w000003",
+      "state": "remove",
+      "type": "dead_pause",
+      "start_ms": 1750,
+      "end_ms": 2950,
+      "reason": "pausa 1500 ms >= soglia 1000 ms",
+      "data": { "gap_ms": 1500, "threshold_ms": 1000 }
+    },
+    {
+      "id": "seg:w000003-w000005",
+      "state": "keep",
+      "type": "speech",
+      "start_ms": 2950,
+      "end_ms": 4200,
+      "reason": "parlato (margine 150 ms per lato)",
+      "data": { "word_span": ["w000003", "w000005"] }
+    },
+    {
+      "id": "gap:w000005-$",
+      "state": "remove",
+      "type": "dead_pause",
+      "start_ms": 4200,
+      "end_ms": 5200,
+      "reason": "silenzio finale 1150 ms >= soglia 1000 ms; margine 150 ms dopo la parola",
+      "data": { "gap_ms": 1150, "threshold_ms": 1000 }
+    }
+  ],
+  "repeat_groups": [
+    {
+      "id": "rg:w000001",
+      "status": "proposed",
+      "similarity": { "min": 0.8, "mean": 0.8 },
+      "compared_to": "take:w000003",
+      "takes": [
+        {
+          "id": "take:w000001",
+          "index": 1,
+          "start_ms": 1200,
+          "end_ms": 1600,
+          "text": "Ciao a",
+          "word_span": ["w000001", "w000002"],
+          "status": "false_start",
+          "coverage": 0.67,
+          "similarity_to_compared": 0.8,
+          "diff_vs_compared": [{ "op": "missing", "text": "tutti", "other_text": null }]
+        },
+        {
+          "id": "take:w000003",
+          "index": 2,
+          "start_ms": 3100,
+          "end_ms": 4050,
+          "text": "Ciao a tutti",
+          "word_span": ["w000003", "w000005"],
+          "status": "complete",
+          "coverage": 1.0,
+          "similarity_to_compared": 1.0,
+          "diff_vs_compared": []
+        }
+      ],
+      "proposal": {
+        "id": "prop:rg:w000001",
+        "type": "repeat_choice",
+        "take_id": "take:w000003",
+        "rule": "last_complete_take",
+        "reason": "ultima presa completa del gruppo; la presa 1 è una falsa partenza interrotta"
+      },
+      "reason": null
+    }
+  ],
+  "warnings": [],
+  "stats": {
+    "raw_ms": 5200,
+    "kept_ms": 1950,
+    "removed_ms": 3250,
+    "repeat_groups": 1,
+    "ambiguous_groups": 0
+  }
+}

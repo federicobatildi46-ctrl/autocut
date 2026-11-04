@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "timeline_ref": { "project": "episodio-12", "timeline_schema_version": 1 },
+  "overrides": {
+    "gap:w000002-w000003": {
+      "id": "ov_0001",
+      "target": { "id": "gap:w000002-w000003", "type": "segment" },
+      "action": "set_state",
+      "value": { "state": "keep" },
+      "proposed": { "state": "remove" },
+      "status": "active",
+      "snapshot": { "start_ms": 1750, "end_ms": 2950, "text": "Ciao a … Ciao" },
+      "note": null
+    },
+    "rg:w000001": {
+      "id": "ov_0002",
+      "target": { "id": "rg:w000001", "type": "repeat_group" },
+      "action": "choose_take",
+      "value": { "take_id": "take:w000001" },
+      "proposed": { "take_id": "take:w000003" },
+      "status": "active",
+      "snapshot": { "takes": ["take:w000001", "take:w000003"] },
+      "note": null
+    }
+  },
+  "history": [
+    {
+      "seq": 1,
+      "at": "2026-11-04T15:40:12+01:00",
+      "action": "create",
+      "override_id": "ov_0001",
+      "target_id": "gap:w000002-w000003",
+      "before": null,
+      "after": { "state": "keep" },
+      "reverts": null
+    },
+    {
+      "seq": 2,
+      "at": "2026-11-04T15:41:03+01:00",
+      "action": "create",
+      "override_id": "ov_0002",
+      "target_id": "rg:w000001",
+      "before": null,
+      "after": { "take_id": "take:w000001" },
+      "reverts": null
+    }
+  ]
+}

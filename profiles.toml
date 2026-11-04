@@ -1,0 +1,39 @@
+# Profili di default (versionati). Livelli di sovrascrittura, dal più debole al più forte:
+#   [defaults] -> [<profilo>] -> projects/<nome>/settings.json -> --set chiave=valore
+# Tutti i tempi sono in millisecondi.
+
+[defaults.pauses]
+threshold_ms = 1000
+margin_ms = 150
+
+[defaults.repeats]
+unit_gap_ms = 400          # pausa che separa due "unità" di parlato candidate a ripetizione
+min_tokens = 3             # sotto questa lunghezza un'unità non entra nei gruppi
+similarity_min = 0.6       # similarità minima per stare nello stesso gruppo
+complete_coverage = 0.85   # copertura minima (vs presa più lunga) per dirsi "completa"
+
+[defaults.transcription]
+provider = "elevenlabs"
+model = "scribe_v2"
+language = "ita"
+audio_events = "keep"      # keep = gli eventi contano come parlato (tranne dead_events); ignore = nessuno
+# Eventi che sono parti morte anche con audio_events = "keep" (sottostringa del tag, minuscolo).
+# Es. Scribe ha marcato un'esitazione come "[esita]" lunga 3,4 s: va tagliata, non protetta.
+dead_events = [
+    "esita", "esitazione", "pausa", "silenzio", "respiro", "sospiro", "tosse", "schiocco",
+    "hesitat", "pause", "silence", "breath", "sigh", "cough", "click",
+]
+
+[defaults.sync]
+max_lag_ms = 120000
+drift_window_ms = 60000
+
+# Orizzontale (YouTube long-form)
+[long.pauses]
+threshold_ms = 1000
+margin_ms = 150
+
+# Verticale (short-form)
+[short.pauses]
+threshold_ms = 800
+margin_ms = 150

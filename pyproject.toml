@@ -1,0 +1,39 @@
+[project]
+name = "autocut"
+version = "0.1.0"
+description = "Motore di montaggio automatico: sync, trascrizione, tagli, ripetizioni -> timeline.json"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "typer>=0.12",
+    "python-dotenv>=1.0",
+    "httpx>=0.28.1",
+    "truststore>=0.10.5",
+]
+
+[project.scripts]
+autocut = "autocut.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autocut"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

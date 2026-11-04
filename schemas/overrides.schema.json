@@ -1,0 +1,212 @@
+{
+  "$defs": {
+    "HistoryEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "seq": {
+          "minimum": 1,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "at": {
+          "format": "date-time",
+          "title": "At",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "create",
+            "update",
+            "remove",
+            "undo",
+            "orphaned",
+            "restored"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "override_id": {
+          "title": "Override Id",
+          "type": "string"
+        },
+        "target_id": {
+          "title": "Target Id",
+          "type": "string"
+        },
+        "before": {
+          "default": null,
+          "title": "Before"
+        },
+        "after": {
+          "default": null,
+          "title": "After"
+        },
+        "reverts": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reverts"
+        }
+      },
+      "required": [
+        "seq",
+        "at",
+        "action",
+        "override_id",
+        "target_id"
+      ],
+      "title": "HistoryEntry",
+      "type": "object"
+    },
+    "Override": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "action": {
+          "enum": [
+            "set_state",
+            "choose_take"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "value": {
+          "additionalProperties": true,
+          "title": "Value",
+          "type": "object"
+        },
+        "proposed": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Proposed"
+        },
+        "status": {
+          "default": "active",
+          "enum": [
+            "active",
+            "orphan"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "snapshot": {
+          "additionalProperties": true,
+          "title": "Snapshot",
+          "type": "object"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "id",
+        "target",
+        "action",
+        "value"
+      ],
+      "title": "Override",
+      "type": "object"
+    },
+    "Target": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "segment",
+            "repeat_group"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "title": "Target",
+      "type": "object"
+    },
+    "TimelineRef": {
+      "additionalProperties": true,
+      "properties": {
+        "project": {
+          "title": "Project",
+          "type": "string"
+        },
+        "timeline_schema_version": {
+          "title": "Timeline Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project",
+        "timeline_schema_version"
+      ],
+      "title": "TimelineRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "timeline_ref": {
+      "$ref": "#/$defs/TimelineRef"
+    },
+    "overrides": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Override"
+      },
+      "title": "Overrides",
+      "type": "object"
+    },
+    "history": {
+      "items": {
+        "$ref": "#/$defs/HistoryEntry"
+      },
+      "title": "History",
+      "type": "array"
+    }
+  },
+  "required": [
+    "timeline_ref"
+  ],
+  "title": "autocut overrides",
+  "type": "object"
+}
