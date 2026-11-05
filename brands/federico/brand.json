@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "id": "federico",
+  "name": "Federico Batildi",
+  "description": "Personal brand AI e automazioni: look premium tech, scuro, con bagliori blu elettrico e viola, testi puliti con una parola chiave in serif corsivo caldo (stile podcast premium).",
+  "palette": {
+    "background": "#05070f",
+    "surface": "#0e1430",
+    "text": "#ffffff",
+    "muted": "#b9c2d8",
+    "accent": "#2f6bff",
+    "accent_2": "#8b5cf6",
+    "highlight": "#f6b25a"
+  },
+  "fonts": {
+    "sans": { "family": "Inter", "source": "google", "weights": [400, 600, 800], "license": "OFL" },
+    "serif": { "family": "Instrument Serif", "source": "google", "weights": [400], "italic": true, "license": "OFL" },
+    "display": { "family": "Inter Tight", "source": "google", "weights": [700, 800], "license": "OFL" }
+  },
+  "captions": {
+    "vertical": {
+      "font": "sans",
+      "weight": 600,
+      "case": "sentence",
+      "color": "text",
+      "size_pct": 4.0,
+      "bottom_pct": 36,
+      "max_words": 4,
+      "max_chars": 24,
+      "shadow": "soft",
+      "emphasis": { "font": "serif", "weight": 400, "italic": true, "color": "highlight", "scale": 1.7 }
+    },
+    "horizontal": {
+      "font": "sans",
+      "weight": 600,
+      "case": "sentence",
+      "color": "text",
+      "size_pct": 4.2,
+      "bottom_pct": 9,
+      "max_words": 7,
+      "max_chars": 40,
+      "shadow": "soft",
+      "emphasis": { "font": "serif", "weight": 400, "italic": true, "color": "highlight", "scale": 1.5 }
+    }
+  },
+  "lower_third": {
+    "enabled": true,
+    "name": "Federico Batildi",
+    "role": "Agenzia AI · Personal brand",
+    "show_ms": [600, 3800],
+    "name_font": "sans",
+    "role_font": "sans"
+  },
+  "graphics": {
+    "style": "card in vetro scuro (glassmorphism) con bordi sottili e glow blu elettrico/viola, angoli molto arrotondati, grandi numeri statistici in sans pesante, grafici con curva al neon, icone app luminose; niente colori pastello",
+    "card_radius_px": 28,
+    "glass": true,
+    "glow": "accent",
+    "references": ["inspiration/on screen inspo", "inspiration/text inspo"]
+  },
+  "transitions": {
+    "default": "cut",
+    "presets": [
+      { "id": "cut", "label": "Taglio netto", "duration_frames": 0 },
+      { "id": "punch-in", "label": "Zoom punch-in (110%)", "duration_frames": 4, "sound": "texture.digital_camera_click" },
+      { "id": "whip-blur", "label": "Whip pan con motion blur", "duration_frames": 8, "sound": "whoosh.transition" },
+      { "id": "glow-flash", "label": "Flash di luce blu", "duration_frames": 6, "sound": "texture.scifi_hit" }
+    ]
+  },
+  "sound": {
+    "guide": "UE-Sound-Design-Claude-Training-COMPLETE.md",
+    "skill": "autocut-sound-design",
+    "library": "library/sfx",
+    "levels_db": { "voice": 0, "whoosh": -12, "texture": -6.5, "riser": -5, "music": -19 },
+    "music_under_graphics": false
+  }
+}

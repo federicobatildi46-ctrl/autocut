@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "id": "editoriale-chiaro",
+  "name": "Editoriale chiaro (esempio cliente)",
+  "description": "Stile editoriale da rivista: sfondi chiari, blu cobalto, titoli serif grandi abbinati a un sans condensato in maiuscolo; adatto a consulenti, psicologi, formazione.",
+  "palette": {
+    "background": "#eef0f4",
+    "surface": "#ffffff",
+    "text": "#ffffff",
+    "muted": "#5b6478",
+    "accent": "#1f3fd1",
+    "accent_2": "#c658c9",
+    "highlight": "#ffd34d"
+  },
+  "fonts": {
+    "sans": { "family": "Archivo", "source": "google", "weights": [500, 700, 800], "license": "OFL" },
+    "serif": { "family": "Playfair Display", "source": "google", "weights": [600, 700], "italic": true, "license": "OFL" },
+    "display": { "family": "Anton", "source": "google", "weights": [400], "license": "OFL" }
+  },
+  "captions": {
+    "vertical": {
+      "font": "display",
+      "weight": 400,
+      "case": "upper",
+      "color": "text",
+      "size_pct": 5.2,
+      "bottom_pct": 36,
+      "max_words": 3,
+      "max_chars": 20,
+      "shadow": "outline",
+      "emphasis": { "font": "display", "weight": 400, "italic": false, "color": "highlight", "scale": 1.25 }
+    },
+    "horizontal": {
+      "font": "sans",
+      "weight": 700,
+      "case": "sentence",
+      "color": "text",
+      "size_pct": 4.4,
+      "bottom_pct": 9,
+      "max_words": 7,
+      "max_chars": 40,
+      "shadow": "outline",
+      "emphasis": { "font": "serif", "weight": 700, "italic": true, "color": "highlight", "scale": 1.3 }
+    }
+  },
+  "lower_third": {
+    "enabled": true,
+    "name": "Nome Cliente",
+    "role": "Ruolo · Azienda",
+    "show_ms": [600, 3800],
+    "name_font": "serif",
+    "role_font": "sans"
+  },
+  "graphics": {
+    "style": "poster editoriali chiari: fotografia o oggetto 3D centrale, titolo serif grande blu cobalto, etichette in sans condensato maiuscolo, tanto spazio bianco, dettagli magenta",
+    "card_radius_px": 14,
+    "glass": false,
+    "glow": "none",
+    "references": ["inspiration"]
+  },
+  "transitions": {
+    "default": "cut",
+    "presets": [
+      { "id": "cut", "label": "Taglio netto", "duration_frames": 0 },
+      { "id": "slide-up", "label": "Scorrimento verso l'alto", "duration_frames": 10, "sound": "whoosh.organic_wind" },
+      { "id": "paper-wipe", "label": "Wipe a pagina", "duration_frames": 12, "sound": "whoosh.hollow" }
+    ]
+  },
+  "sound": {
+    "guide": "UE-Sound-Design-Claude-Training-COMPLETE.md",
+    "skill": "autocut-sound-design",
+    "library": "library/sfx",
+    "levels_db": { "voice": 0, "whoosh": -12, "texture": -7, "riser": -5, "music": -19 },
+    "music_under_graphics": false
+  }
+}

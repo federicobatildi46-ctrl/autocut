@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "id": "premium",
+  "name": "Premium tech",
+  "description": "Elegante e costoso: camera fissa, luce buona, look cinematografico caldo, pochi tagli veri e punch-in morbidi tra le frasi. Hook-copertina centrato nei primi 3 secondi (riga piccola + parola GRANDE nel colore del brand, lettere che entrano una a una). Poi sottotitoli a metà schermo: riga piccola pulita + parola chiave grande e bold su una riga sua, entrata sfocata. Card in liquid glass e immagini AI ultra realistiche. Suoni sottili e motivati. Reference: Belfort (@wolfofwallst) + pin editoriali.",
+  "fonts": {},
+  "grade": {
+    "contrast": 1.08,
+    "saturation": 0.9,
+    "brightness": 0.98,
+    "warmth": 0.12,
+    "vignette": 0.38
+  },
+  "pacing": {
+    "camera": "fixed",
+    "target_shot_s": 8,
+    "punch_in": {
+      "enabled": true,
+      "scale": 1.09,
+      "mode": "phrase_alternate",
+      "ease_ms": 450
+    }
+  },
+  "captions": {
+    "case": "sentence",
+    "size_scale": 1.4,
+    "max_words": 5,
+    "max_chars": 32,
+    "bottom_pct": 38,
+    "stroke_px": 0,
+    "shadow": "soft",
+    "colors": [],
+    "emphasis": "brand",
+    "emphasis_layout": "line",
+    "emphasis_scale": 2.4,
+    "emphasis_font": "display",
+    "emphasis_weight": 800,
+    "emphasis_italic": false,
+    "animation": "blur_in"
+  },
+  "hook": {
+    "enabled": true,
+    "duration_ms": 3000,
+    "center_pct": 60,
+    "size_pct": 15,
+    "kicker_ratio": 0.36,
+    "sub_ratio": 0.3,
+    "big_font": "display",
+    "weight": 600,
+    "big_weight": 800,
+    "case": "sentence",
+    "kicker_color": "#FFFFFF",
+    "big_color": "highlight",
+    "sub_color": "#FFFFFF",
+    "stroke_px": 0,
+    "shadow": "soft",
+    "animation": "reveal",
+    "dim": 0.3
+  },
+  "cards": {
+    "kind": "liquid_glass",
+    "hold_ms": 2800
+  },
+  "lower_third": true,
+  "transitions": [
+    "punch-in",
+    "zoom-blur",
+    "fade",
+    "light-leak"
+  ],
+  "ai_graphics": "Immagini e oggetti 3D ultra realistici, luce cinematografica calda, profondità di campo, palette sobria con un solo accento; presentati in card liquid glass o come oggetti ritagliati che fluttuano dietro/sopra la persona. Mai testo dentro l'immagine.",
+  "sound": {
+    "density": "low",
+    "events": {
+      "caption": null,
+      "emphasis": "whoosh.deep_voice",
+      "cut": null,
+      "punch": null,
+      "card_in": "texture.scifi_impact",
+      "hook": "whoosh.deep_voice",
+      "flash": null,
+      "block": null
+    },
+    "voice_lufs": -14,
+    "relative_db": {
+      "textures": -20,
+      "whooshes": -19,
+      "risers": -16,
+      "hits": -18
+    },
+    "min_gap_ms": 2500,
+    "music": true,
+    "music_db": -19,
+    "emphasis_gap_ms": 9000
+  }
+}

@@ -41,7 +41,7 @@ def build(
     if fingerprint(src) != cam.fingerprint:
         raise EditorError(f"{cam.file_name} è cambiato dall'ingest: rilancia ingest")
     media = prepare(pdir, tl, src, log=log)
-    return create_app(pdir, media), pdir
+    return create_app(pdir, media, auto_popups=True), pdir
 
 
 def serve(app, *, port: int, open_browser: bool) -> None:

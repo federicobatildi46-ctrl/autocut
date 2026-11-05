@@ -45,3 +45,6 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 # i prompt per Claude sono testo lungo dentro stringhe
 "src/autocut/editor/agent.py" = ["E501"]
+"src/autocut/sound/manifest.py" = ["E501"]
+"src/autocut/render/captions.py" = ["E501"]  # elenco stopword, identico a quello dell'editor
+"src/autocut/popups.py" = ["E501"]  # prompt per Claude

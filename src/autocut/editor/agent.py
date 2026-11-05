@@ -52,6 +52,13 @@ class FrameContext:
     portrait: bool
     transcript: str  # parlato intorno al frame
     project: str
+    brand: str = ""  # descrizione del brand pack attivo (palette, font, stile grafico)
+
+
+def _brand_block(ctx: FrameContext) -> str:
+    if not ctx.brand:
+        return ""
+    return f"\nBrand pack da rispettare (colori, tipografia, stile delle grafiche): {ctx.brand}\n"
 
 
 def budget_for(kind: str) -> int:
@@ -145,7 +152,7 @@ def suggest_prompt(ctx: FrameContext) -> str:
 Formato del video: {_format(ctx)}.
 Frame selezionato a {ctx.rel_ms / 1000:.1f} s: il file immagine è {ctx.frame_path} — guardalo con lo strumento Read.
 Cosa dice il creator intorno a questo punto: «{ctx.transcript or "(silenzio)"}»
-
+{_brand_block(ctx)}
 Proponi 3 idee concrete e diverse per arricchire questo punto con Higgsfield:
 - un B-roll video AI ultra realistico che illustra quello che dice,
 - un'immagine o uno sfondo AI,
@@ -175,7 +182,7 @@ Formato: aspect_ratio {_aspect(ctx)} ({_format(ctx)}).
 Frame del video a {ctx.rel_ms / 1000:.1f} s: {ctx.frame_path} — guardalo con Read. Se serve coerenza con la
 scena (persona, luce, ambiente) passalo alla CLI come riferimento: --image-references "{ctx.frame_path}".
 Cosa dice il creator in quel punto: «{ctx.transcript or "(silenzio)"}»
-
+{_brand_block(ctx)}
 Regole:
 - UN SOLO job, con {model_hint};
 - scrivi tu il prompt per il modello, in inglese, dettagliato, ultra realistico;
@@ -278,6 +285,11 @@ class ClaudeAgent:
         if not out:
             raise AgentError("Claude non ha proposto idee")
         return out
+
+    def ask_json(self, prompt: str) -> dict[str, Any]:
+        """Domanda testuale (pop-up: analisi del parlato e chat). Nessuno strumento che
+        modifichi o generi: la risposta è solo un JSON di operazioni da applicare."""
+        return self._run(prompt, ["Read"], SUGGEST_TIMEOUT_S)
 
     def generate(self, ctx: FrameContext, kind: str, request: str) -> dict[str, Any]:
         tools = ["Read", "Skill", "Bash(higgsfield:*)", "Bash(hf:*)"]

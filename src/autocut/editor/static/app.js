@@ -33,6 +33,11 @@ const S = {
   suggestAt: null,
   suggesting: false,
   pollTimer: null,
+  brand: null,
+  brandKey: null,
+  look: null,
+  lookKey: "null",
+  phrases: [],
   thumbW: 40,
   lastChunk: -1,
   lastWord: -1,
@@ -161,7 +166,262 @@ function tick() {
   updatePlayhead(cur);
   updateClock(cur);
   updateCaption(cur);
+  updateLowerThird(cur);
+  updateLook(cur);
+  updatePopups(cur);
   requestAnimationFrame(tick);
+}
+
+// --- brand pack ----------------------------------------------------------------
+
+// Parole che non diventano mai la parola chiave evidenziata.
+const STOPWORDS = new Set(
+  ("il lo la i gli le un uno una di a da in con su per tra fra e ed o ma che chi cui non è era sono " +
+   "ho hai ha abbiamo avete hanno mi ti si ci vi ne del dello della dei degli delle al allo alla ai " +
+   "agli alle dal dalla dai nel nello nella nei nelle sul sulla sui questo questa questi quello quella " +
+   "io tu lui lei noi voi loro mio mia miei tuo tua suo sua come cosa più anche poi già qui lì così " +
+   "molto tutto tutti fare fatto essere stato sempre quando dove perché proprio ancora allora quindi " +
+   "vuole voglio vuoi volete vogliono posso puoi può possiamo devo deve dobbiamo dire detto faccio " +
+   "fanno vado andare provare proverò sapete sapere vedere guardare mettere prendere stesso stessa " +
+   "abbastanza veramente davvero praticamente semplicemente comunque insomma diciamo conseguenza " +
+   "eh ok the and a of to is it you").split(" "),
+);
+
+function emphasisIndex(words) {
+  let best = -1, score = 0;
+  words.forEach((w, i) => {
+    const clean = w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+    if (!clean || STOPWORDS.has(clean)) return;
+    const s = /\p{N}/u.test(clean) ? 100 : clean.length;
+    if (s > score) { score = s; best = i; }
+  });
+  // meglio nessuna evidenziazione che una parola debole: numeri sempre, altrimenti >= 6 lettere
+  return score >= 6 ? best : -1;
+}
+
+function styleFor(brand) {
+  if (!brand) return null;
+  return S.portrait ? brand.captions.vertical : brand.captions.horizontal;
+}
+
+function captionHTML(chunk) {
+  const style = styleFor(S.brand);
+  if ((!style && !S.look) || chunk.event) return esc(chunk.text);
+  const words = chunk.text.split(/\s+/);
+  let idx, block;
+  if (S.look) {
+    const e = S.look.captions.emphasis;
+    idx = e ? emphasisIndex(words) : -1;
+    block = Boolean(e && e.layout === "line");
+  } else {
+    idx = style.emphasis && style.emphasis.rule !== "none" ? emphasisIndex(words) : -1;
+    block = style.emphasis && style.emphasis.scale >= 1.4;
+  }
+  return words.map((w, i) => i === idx
+    ? `<span class="emph${block ? " block" : ""}">${esc(w)}</span>`
+    : esc(w)).join(" ");
+}
+
+function fontStack(brand, key, fallback) {
+  const f = brand?.fonts?.[key];
+  return f ? `"${f.family}", ${fallback}` : fallback;
+}
+
+function applyBrand(brand) {
+  S.brand = brand;
+  S.brandKey = brand?.id ?? "";
+  const frame = $("#frame");
+  // font da Google Fonts (o locali in futuro)
+  let link = $("#brand-fonts");
+  if (brand?.google_fonts_url) {
+    if (!link) {
+      link = document.createElement("link");
+      link.id = "brand-fonts";
+      link.rel = "stylesheet";
+      document.head.appendChild(link);
+    }
+    link.href = brand.google_fonts_url;
+  } else if (link) link.remove();
+
+  frame.classList.toggle("branded", Boolean(brand));
+  const cap = $("#caption");
+  cap.className = "caption" + ($("#btn-cc").classList.contains("on") ? "" : " off");
+  const style = styleFor(brand);
+  if (brand && style) {
+    const pal = brand.palette;
+    const caseMap = { sentence: "none", upper: "uppercase", lower: "lowercase" };
+    const vars = {
+      "--cap-font": fontStack(brand, style.font, "system-ui, sans-serif"),
+      "--cap-weight": String(style.weight),
+      "--cap-color": pal[style.color] ?? "#fff",
+      "--cap-case": caseMap[style.case] ?? "none",
+      "--cap-bottom": `${style.bottom_pct}%`,
+      "--emph-font": fontStack(brand, style.emphasis?.font ?? style.font, "Georgia, serif"),
+      "--emph-style": style.emphasis?.italic ? "italic" : "normal",
+      "--emph-weight": String(style.emphasis?.weight ?? style.weight),
+      "--emph-color": pal[style.emphasis?.color ?? style.color] ?? "#fff",
+      "--emph-scale": String(style.emphasis?.scale ?? 1),
+      "--lt-name-font": fontStack(brand, brand.lower_third?.name_font ?? "sans", "system-ui, sans-serif"),
+      "--lt-role-font": fontStack(brand, brand.lower_third?.role_font ?? "sans", "system-ui, sans-serif"),
+      "--lt-accent": pal.accent,
+      "--lt-role-color": pal.muted,
+      "--lt-radius": `${Math.round(brand.graphics.card_radius_px / 2)}px`,
+      "--lt-bg": brand.graphics.glass ? `${pal.surface}b3` : pal.surface,
+      "--lt-border": `${pal.accent}55`,
+      "--lt-glow": brand.graphics.glow === "none" ? "none" : `0 0 24px ${pal[brand.graphics.glow] ?? pal.accent}55`,
+    };
+    Object.entries(vars).forEach(([k, v]) => frame.style.setProperty(k, v));
+    cap.classList.add(`shadow-${style.shadow}`);
+  }
+  const lt = $("#lower-third");
+  lt.querySelector(".lt-name").textContent = brand?.lower_third?.name ?? "";
+  lt.querySelector(".lt-role").textContent = brand?.lower_third?.role ?? "";
+
+  const limits = style
+    ? { words: style.max_words, chars: style.max_chars }
+    : CHUNK_LIMITS[S.portrait ? "portrait" : "landscape"];
+  S.chunks = buildChunks(S.words, limits);
+  S.lastChunk = -1;
+  fitFrame();
+  renderTextTrack();
+}
+
+// --- preset di stile (look brand × stile, risolto dal server) --------------------------
+
+// Inizio di ogni frase (dopo . ? ! o una pausa lunga): lì cambia il punch-in "phrase_alternate".
+function phraseStarts(words) {
+  const out = [];
+  let prev = null;
+  for (const w of words) {
+    if (w.kind !== "word") continue;
+    if (!prev || /[.?!]$/.test(prev.text) || w.start_ms - prev.end_ms > 700) out.push(w.start_ms);
+    prev = w;
+  }
+  return out;
+}
+
+// Righe dell'hook con il ruolo (come render/preview.py: hook_lines): kicker, big, sub.
+function hookLines(text) {
+  const raw = String(text).split(/\||\n/).map((x) => x.trim()).filter(Boolean);
+  const marked = raw.findIndex((x) => x.length > 2 && x.startsWith("*") && x.endsWith("*"));
+  const big = marked >= 0 ? marked : raw.length === 1 ? 0 : 1;
+  return raw.map((x, i) => ({
+    text: i === big ? x.replace(/^\*|\*$/g, "").trim() : x,
+    role: i === big ? "big" : i < big ? "kicker" : "sub",
+  }));
+}
+
+function applyLook(look) {
+  S.look = look;
+  const frame = $("#frame");
+  let link = $("#style-fonts");
+  if (look?.fonts_url) {
+    if (!link) {
+      link = document.createElement("link");
+      link.id = "style-fonts";
+      link.rel = "stylesheet";
+      document.head.appendChild(link);
+    }
+    link.href = look.fonts_url;
+  } else if (link) link.remove();
+  frame.classList.toggle("styled", Boolean(look));
+  frame.classList.toggle("stroked", Boolean(look && look.captions.stroke_px > 0));
+  frame.classList.toggle("punch-smooth", Boolean(look && look.pacing.punch_in.ease_ms > 0));
+  video.style.filter = look ? look.grade.css_filter : "";
+  video.style.transform = "";
+  const v = look?.grade.vignette ?? 0;
+  $("#vignette").style.background = v > 0
+    ? `radial-gradient(ellipse at 50% 42%, transparent 48%, rgba(0,0,0,${(0.85 * v).toFixed(2)}) 100%)` : "";
+  if (look) {
+    const c = look.captions;
+    const caseMap = { sentence: "none", upper: "uppercase", lower: "lowercase" };
+    const vars = {
+      "--cap-font": `"${c.font}", system-ui, sans-serif`,
+      "--cap-weight": String(c.weight),
+      "--cap-case": caseMap[c.case] ?? "none",
+      "--cap-bottom": `${c.bottom_pct}%`,
+    };
+    if (c.emphasis) {
+      Object.assign(vars, {
+        "--emph-font": c.emphasis.font ? `"${c.emphasis.font}", Georgia, serif` : vars["--cap-font"],
+        "--emph-style": c.emphasis.italic ? "italic" : "normal",
+        "--emph-weight": String(c.emphasis.weight ?? c.weight),
+        "--emph-color": c.emphasis.color,
+        "--emph-scale": String(c.emphasis.scale),
+      });
+    }
+    if (look.hook) {
+      const h = look.hook;
+      Object.assign(vars, {
+        "--hook-font": `"${h.font}", system-ui, sans-serif`,
+        "--hook-big-font": `"${h.big_font}", system-ui, sans-serif`,
+        "--hook-weight": String(h.weight),
+        "--hook-big-weight": String(h.big_weight),
+        "--hook-kicker": String(h.kicker_ratio),
+        "--hook-sub": String(h.sub_ratio),
+        "--hook-stroke-color": h.stroke_color,
+        "--hook-big-stroke-color": h.big_stroke_color,
+        "--hook-case": h.case === "upper" ? "uppercase" : "none",
+      });
+    }
+    Object.entries(vars).forEach(([k, val]) => frame.style.setProperty(k, val));
+    S.chunks = buildChunks(S.words, { words: c.max_words, chars: c.max_chars });
+  }
+  const hook = $("#hook");
+  hook.innerHTML = look?.hook ? hookLines(S.data?.hook ?? "").map((l) =>
+    `<span class="line ${l.role}" style="color:${look.hook.colors[l.role]}">${esc(l.text)}</span>`).join("") : "";
+  S.phrases = phraseStarts(S.words);
+  S.lastChunk = -1;
+  fitFrame();
+  renderTextTrack();
+}
+
+function updateLook(cur) {
+  const look = S.look;
+  if (!look) return;
+  const pi = look.pacing.punch_in;
+  let scale = 1;
+  if (pi.enabled) {
+    let i = -1;
+    if (pi.mode === "cut_alternate") {
+      // zoom secco a ogni taglio: conta i tratti tenuti prima di adesso
+      for (const r of S.eff) { if (r.start_ms > cur) break; if (r.state === "keep") i++; }
+    } else {
+      for (let k = 0; k < S.phrases.length && S.phrases[k] <= cur; k++) i = k;
+    }
+    scale = i % 2 === 1 ? pi.scale : 1;
+  }
+  const tf = scale === 1 ? "" : `scale(${scale})`;
+  if (video.style.transform !== tf) video.style.transform = tf;
+  const hook = $("#hook");
+  const t = S.mode === "edited" ? editedAt(cur) : cur - S.axisStart;
+  const hooking = Boolean(look.hook && hook.innerHTML && t < look.hook.duration_ms);
+  hook.classList.toggle("on", hooking);
+  $("#frame").classList.toggle("hooking", hooking); // l'hook è la copertina: niente sottotitoli
+}
+
+function renderStyleSelect() {
+  const sel = $("#style-select");
+  const opts = [`<option value="">Nessuno</option>`]
+    .concat((S.data.styles ?? []).map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`));
+  sel.innerHTML = opts.join("");
+  sel.value = S.look?.style ?? "";
+}
+
+function updateLowerThird(cur) {
+  const lt = S.brand?.lower_third;
+  const el = $("#lower-third");
+  if (!lt || !lt.enabled) { el.classList.remove("on"); return; }
+  const t = S.mode === "edited" ? editedAt(cur) : cur - S.axisStart;
+  el.classList.toggle("on", t >= lt.show_ms[0] && t <= lt.show_ms[1]);
+}
+
+function renderBrandSelect() {
+  const sel = $("#brand-select");
+  const opts = [`<option value="">Nessuno</option>`]
+    .concat(S.data.brands.map((b) => `<option value="${esc(b.id)}">${esc(b.name)}</option>`));
+  sel.innerHTML = opts.join("");
+  sel.value = S.brandKey ?? "";
 }
 
 function updateClock(cur) {
@@ -182,7 +442,15 @@ function updateCaption(cur) {
   }
   if (idx !== S.lastChunk) {
     S.lastChunk = idx;
-    $("#caption").textContent = idx >= 0 ? S.chunks[idx].text : "";
+    const capEl = $("#caption");
+    capEl.innerHTML = idx >= 0 ? captionHTML(S.chunks[idx]) : "";
+    if (S.look) {
+      const colors = S.look.captions.colors;
+      capEl.style.color = idx >= 0 ? colors[idx % colors.length] : "";
+      const anim = S.look.captions.animation;
+      capEl.classList.remove("anim-pop", "anim-blur_in");
+      if (idx >= 0 && anim !== "none") { void capEl.offsetWidth; capEl.classList.add(`anim-${anim}`); }
+    } else capEl.style.color = "";
     document.querySelectorAll(".chunk.now").forEach((n) => n.classList.remove("now"));
     if (idx >= 0) document.querySelector(`.chunk[data-i="${idx}"]`)?.classList.add("now");
   }
@@ -248,24 +516,37 @@ function apply(data) {
     S.axisEnd = data.media.offset_ms + data.media.duration_ms;
     S.thumbW = Math.max(28, Math.round(52 * (v.display_width / v.display_height)));
   }
+  const lookKey = JSON.stringify([data.style ?? null, data.hook ?? null]);
+  if ((data.brand?.id ?? "") !== S.brandKey || lookKey !== S.lookKey) {
+    applyBrand(data.brand);
+    applyLook(data.style ?? null);
+    S.lookKey = lookKey;
+  } else S.brand = data.brand;
+  renderBrandSelect();
+  renderStyleSelect();
   $("#project-title").textContent = data.project;
   $("#player-name").textContent = S.tl.sources.camera.file_name;
   $("#btn-undo-top").disabled = !data.summary.can_undo;
   $("#tl-undo").disabled = !data.summary.can_undo;
   const todo = S.decisions.filter((d) => !d.reviewed).length;
   $("#ai-count").textContent = todo ? String(todo) : "";
+  const popTodo = (data.popups ?? []).filter((p) => p.status === "proposed").length;
+  $("#pop-count").textContent = popTodo ? String(popTodo) : "";
+  $("#popup-layer").dataset.key = "";
   renderStats();
   renderRanges();
   renderTextTrack();
   renderLeft();
-  if (!(S.rightTab === "boost" && document.activeElement?.id === "boost-prompt")) renderRight();
+  const typing = ["boost-prompt", "pop-prompt"].includes(document.activeElement?.id);
+  if (!typing) renderRight();
   updateToggle();
   managePolling();
 }
 
 // Finché una richiesta AI è in lavorazione, aggiorna lo stato ogni 4 s.
 function managePolling() {
-  const running = (S.data?.ai_requests ?? []).some((r) => r.status === "running");
+  const running = (S.data?.ai_requests ?? []).some((r) => r.status === "running")
+    || S.data?.popup_job?.status === "running";
   if (running && !S.pollTimer) {
     S.pollTimer = setInterval(async () => {
       try { apply(await api("/api/project")); } catch { /* riprova al prossimo giro */ }
@@ -531,6 +812,7 @@ function renderRight() {
   if (!S.data) return;
   const body = $("#right-body");
   if (S.rightTab === "ai") body.innerHTML = renderAiTab();
+  else if (S.rightTab === "popups") body.innerHTML = renderPopupsTab();
   else if (S.rightTab === "boost") body.innerHTML = renderBoostTab();
   else body.innerHTML = renderDetailsTab();
 }
@@ -619,6 +901,116 @@ function renderGroup(g) {
   return `<div class="card" data-id="${esc(g.id)}"><div class="card-head"><span class="card-title">Ripetizione</span>
     <span class="card-time">${g.takes.length} prese</span></div>
     <div class="comment"><span class="ai-dot">AI</span><div>${esc(g.proposal?.reason ?? g.reason ?? "")}</div></div>${takes}</div>`;
+}
+
+// --- pop-up ----------------------------------------------------------------------------
+
+const POP_KIND = { image: "Immagine", emoji: "Emoji", text: "Testo" };
+const POP_ORIGIN = { auto: "automatico", ai: "Claude", user: "tu" };
+const POP_STATUS = { proposed: "Proposto", approved: "✓ Approvato", rejected: "Rifiutato" };
+const POP_PLACE = { side: "di lato", above: "sopra il testo", pair: "coppia ai lati", center: "grande al centro",
+  top: "in alto", behind: "dietro di te" };
+const POP_SIZE = { small: "piccolo", medium: "medio", large: "grande" };
+
+function popupThumb(p) {
+  if (p.image_url) return `<img class="pop-thumb" src="${esc(p.image_url)}" alt="">`;
+  if (p.kind === "emoji") return `<span class="pop-thumb emoji">${esc(p.emoji)}</span>`;
+  if (p.kind === "image") return `<span class="pop-thumb wait" title="immagine da generare">🖼</span>`;
+  return `<span class="pop-thumb text">Aa</span>`;
+}
+
+function renderPopupsTab() {
+  const items = S.data.popups ?? [];
+  const styleName = S.look?.style_name ?? "nessuno stile (logica premium)";
+  const job = S.data.popup_job ?? {};
+  const busyText = S.popBusy || (job.status === "running"
+    ? `Claude sta proponendo da solo i pop-up per lo stile ${S.look?.style_name ?? ""}: pochi e solo nei punti giusti…` : "");
+  const busy = busyText
+    ? `<div class="ideas-box"><div class="spinner-row"><span class="spinner"></span>${esc(busyText)}</div></div>` : "";
+  const note = S.popMessage ?? (job.status === "done" || job.status === "error" ? job.message : null);
+  const msg = note ? `<div class="comment"><span class="ai-dot">AI</span><div>${esc(note)}</div></div>` : "";
+  const list = items.map((p) => {
+    const toGen = p.kind === "image" && !p.image_url;
+    const genState = p.image_status === "running" ? "Generazione in corso…" : p.image_status === "error" ? "Errore nella generazione" : "";
+    return `
+      <div class="card pop${p.status === "rejected" ? " rejected" : ""}" data-pop="${esc(p.id)}">
+        <div class="card-head">
+          ${popupThumb(p)}
+          <span class="card-title">${esc(p.title || p.emoji || POP_KIND[p.kind])}</span>
+          <span class="badge">${esc(POP_KIND[p.kind])} · ${esc(POP_PLACE[p.placement])} · ${esc(POP_SIZE[p.size])}</span>
+          <span class="card-time">${clock(p.at_ms - S.axisStart)} · ${secs(p.duration_ms)}</span>
+        </div>
+        <div class="comment"><span class="ai-dot">${p.origin === "user" ? "Tu" : "AI"}</span>
+          <div>${esc(p.reason || "—")}<div class="why">da ${esc(POP_ORIGIN[p.origin])}${p.image_prompt && toGen ? ` · prompt: ${esc(p.image_prompt)}` : ""}${genState ? ` · ${genState}` : ""}</div></div></div>
+        <div class="card-actions">
+          <span class="badge${p.status === "approved" ? " ok" : ""}">${POP_STATUS[p.status]}</span>
+          <button class="act${p.sound ? " on" : ""}" data-act="pop-sound" data-id="${esc(p.id)}" title="Suono quando compare">${p.sound ? "🔊" : "🔇"}</button>
+          <span style="flex:1"></span>
+          <button class="act" data-act="pop-go" data-id="${esc(p.id)}">${ICON_PLAY}Vai</button>
+          ${toGen && p.image_prompt && p.image_status !== "running"
+            ? `<button class="act ai" data-act="pop-gen" data-id="${esc(p.id)}" title="Usa crediti Higgsfield">✦ Genera</button>` : ""}
+          ${p.status === "proposed"
+            ? `<button class="act yes" data-act="pop-approve" data-id="${esc(p.id)}">${ICON_OK}Approva</button>
+               <button class="act no" data-act="pop-reject" data-id="${esc(p.id)}">Rifiuta</button>`
+            : `<button class="act" data-act="pop-reset" data-id="${esc(p.id)}">${ICON_KEEP}Rimetti proposta</button>`}
+          <button class="act no" data-act="pop-delete" data-id="${esc(p.id)}" title="Elimina">✕</button>
+        </div>
+      </div>`;
+  }).join("");
+  return `
+    <div class="summary">
+      <div class="sub">Stile: <b>${esc(styleName)}</b>. Claude li propone da solo quando scegli lo stile, con
+        parsimonia; tu tieni solo quelli giusti. Compaiono quando dici la parola; il suono solo su quelli con 🔊.</div>
+      <div class="row" style="margin-top:8px">
+        <button class="act primary" data-act="pop-suggest" ${busyText ? "disabled" : ""}>✦ Analizza di nuovo il parlato</button>
+      </div>
+    </div>
+    <div class="boost-box">
+      <textarea id="pop-prompt" rows="3" placeholder="Chiedi a Claude, es. «qui metti un'emoji 💸 invece dell'immagine», «togli il pop-up a 0:41», «aggiungine uno quando dico Italia»"></textarea>
+      <div class="row"><span class="sub">Riferito al punto ${clock(nowMs() - S.axisStart)}</span>
+        <button class="act ai" data-act="pop-chat" ${S.popBusy ? "disabled" : ""}>Invia</button></div>
+    </div>
+    ${busy}${msg}
+    <div class="section-title" style="margin-top:12px">Pop-up (${items.length})</div>
+    ${list || `<div class="placeholder">Nessun pop-up: premi «Analizza il parlato» o chiedi a Claude.</div>`}`;
+}
+
+async function popupAi(path, body, busyText) {
+  video.pause();
+  S.popBusy = busyText;
+  S.popMessage = null;
+  renderRight();
+  try {
+    const res = await api(path, body);
+    apply(res);
+    S.popMessage = res.popup_message ?? null;
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    S.popBusy = null;
+    renderRight();
+  }
+}
+
+// Pop-up nell'anteprima: compaiono sopra il video come nel render (vetro o sticker).
+function updatePopups(cur) {
+  const layer = $("#popup-layer");
+  const items = (S.data?.popups ?? []).filter((p) => p.status !== "rejected"
+    && cur >= p.at_ms && cur < p.at_ms + p.duration_ms && !(p.kind === "image" && !p.image_url));
+  const key = items.map((p) => p.id).join(",");
+  if (layer.dataset.key === key) return;
+  layer.dataset.key = key;
+  const kind = S.look?.cards.kind ?? "liquid_glass";
+  layer.innerHTML = items.map((p) => `
+    <div class="pop-el ${kind === "sticker" ? "sticker" : "glass"} at-${p.placement} sz-${p.size} sd-${p.side} k-${p.image_url ? "image" : p.kind}"
+      ${p.placement === "behind" ? 'title="nel render passa dietro di te"' : ""}>
+      ${p.image_url ? `<img src="${esc(p.image_url)}" alt="">`
+        : p.emoji ? (p.placement === "pair"
+          ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(p.emoji)].map((g) => g.segment).filter((g) => g.trim())
+              .map((g, i) => `<div class="em pair-${i}">${esc(g)}</div>`).join("")
+          : `<div class="em">${esc(p.emoji)}</div>`) : ""}
+      ${p.title && p.placement !== "pair" ? `<div class="t">${esc(p.title)}</div>` : ""}
+    </div>`).join("");
 }
 
 const IDEAS = [
@@ -780,6 +1172,7 @@ function captureFrame() {
 
 const TOOL_TABS = [
   ["media", "File multimediali", `<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>`],
+  ["brand", "Brand", `<svg viewBox="0 0 24 24"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 4.5 9-4.5"/></svg>`],
   ["audio", "Audio", `<svg viewBox="0 0 24 24"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>`],
   ["text", "Testo", `<svg viewBox="0 0 24 24"><path d="M4 7V5h16v2M12 5v14M9 19h6"/></svg>`],
   ["stickers", "Sticker", `<svg viewBox="0 0 24 24"><path d="M15 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h7l8-8V6a3 3 0 0 0-3-3h-3z"/><path d="M13 21v-5a3 3 0 0 1 3-3h5"/></svg>`],
@@ -798,6 +1191,7 @@ function renderLeft() {
   renderToolTabs();
   const box = $("#left-content");
   if (S.leftTab === "media") box.innerHTML = renderMedia();
+  else if (S.leftTab === "brand") box.innerHTML = renderBrandPanel();
   else if (S.leftTab === "subs") box.innerHTML = renderTranscript();
   else {
     const label = TOOL_TABS.find((t) => t[0] === S.leftTab)?.[1] ?? "";
@@ -829,6 +1223,52 @@ function renderMedia() {
     ${ignored}
     <div class="info" style="margin-top:14px">I file raw restano dove sono e non vengono mai modificati:
       l'editor usa una copia di anteprima leggera in <code>projects/${esc(S.data.project)}/work/</code>.</div>`;
+}
+
+function renderBrandPanel() {
+  const list = S.data.brands.map((b) => `
+    <div class="brand-card${b.id === S.brandKey ? " on" : ""}" data-brand="${esc(b.id)}">
+      <div class="bname">${esc(b.name)}</div>
+      ${b.id === S.brandKey ? `<div class="bdesc">${esc(S.brand?.description ?? "")}</div>` : ""}
+    </div>`).join("");
+  const none = `<div class="brand-card${!S.brandKey ? " on" : ""}" data-brand="">
+      <div class="bname">Nessuno</div><div class="bdesc">Anteprima base, senza stile.</div></div>`;
+  const b = S.brand;
+  if (!b) {
+    return `<div class="section-title">Brand pack</div>${list}${none}
+      <div class="info">I brand pack sono in <code>brands/&lt;id&gt;/brand.json</code>: palette, font,
+      sottotitoli, lower third, grafiche, transizioni e sound. Scegline uno per applicarlo al video.</div>`;
+  }
+  const style = styleFor(b);
+  const swatches = Object.entries(b.palette).map(([k, v]) =>
+    `<div class="swatch" style="background:${esc(v)}" title="${esc(k)} ${esc(v)}"><span>${esc(k.replace("_", " "))}</span></div>`).join("");
+  const fonts = Object.entries(b.fonts).map(([k, f]) => `
+    <div class="font-row"><span class="sample" style="font-family:'${esc(f.family)}';${f.italic ? "font-style:italic;" : ""}font-weight:${f.weights.at(-1)}">${esc(f.family)}</span>
+      <span class="fmeta">${esc(k)} · ${esc(f.source)}${f.license ? ` · ${esc(f.license)}` : ""}</span></div>`).join("");
+  const sampleWords = ["Quanti", "clienti", "hai", "chiuso?"];
+  const sample = sampleWords.map((w, i) => i === 1
+    ? `<span style="font-family:${esc(fontStack(b, style.emphasis?.font ?? style.font, "serif"))};font-style:${style.emphasis?.italic ? "italic" : "normal"};color:${esc(b.palette[style.emphasis?.color ?? "highlight"])};font-size:${style.emphasis?.scale ?? 1}em;display:block">${w}</span>`
+    : w).join(" ");
+  const transitions = b.transitions.presets.map((t) =>
+    `<span class="tag mute" title="${t.sound ? `suono: ${esc(t.sound)}` : "senza suono"}">${esc(t.label)}${t.duration_frames ? ` · ${t.duration_frames}f` : ""}</span>`).join("");
+  const levels = Object.entries(b.sound.levels_db).map(([k, v]) => `<span class="tag mute">${esc(k)} ${v} dB</span>`).join("");
+  const refs = b.reference_images.slice(0, 16).map((u) => `<img src="${esc(u)}" loading="lazy" alt="">`).join("");
+  return `
+    <div class="section-title">Brand pack</div>${list}${none}
+    <div class="section-title" style="margin-top:14px">Palette</div><div class="swatches" style="margin-bottom:18px">${swatches}</div>
+    <div class="section-title">Font</div>${fonts}
+    <div class="section-title" style="margin-top:14px">Sottotitoli (${S.portrait ? "verticale" : "orizzontale"})</div>
+    <div class="cap-sample" style="font-family:${esc(fontStack(b, style.font, "sans-serif"))};font-weight:${style.weight};color:${esc(b.palette[style.color])};font-size:18px">${sample}</div>
+    <div class="chips" style="margin-bottom:12px"><span class="tag mute">max ${style.max_words} parole</span>
+      <span class="tag mute">${style.size_pct}% del lato</span><span class="tag mute">a ${style.bottom_pct}% dal fondo</span>
+      <span class="tag mute">parola chiave: numeri o la più lunga</span></div>
+    ${b.lower_third ? `<div class="section-title">Lower third</div><div class="meta" style="margin-bottom:12px">${esc(b.lower_third.name)} — ${esc(b.lower_third.role)} · ${(b.lower_third.show_ms[0] / 1000).toFixed(1)}–${(b.lower_third.show_ms[1] / 1000).toFixed(1)} s</div>` : ""}
+    <div class="section-title">Transizioni</div><div class="chips" style="margin-bottom:12px">${transitions}</div>
+    <div class="section-title">Sound</div><div class="chips" style="margin-bottom:6px">${levels}</div>
+    <div class="meta" style="color:var(--muted);font-size:12px;margin-bottom:12px">Regole: skill <code>${esc(b.sound.skill ?? "—")}</code>,
+      libreria <code>${esc(b.sound.library)}</code>${b.sound.music_under_graphics ? "" : " · niente musica sotto le grafiche"}.</div>
+    <div class="section-title">Stile grafico</div><div class="meta" style="color:var(--muted);font-size:12px;margin-bottom:10px">${esc(b.graphics.style)}</div>
+    ${refs ? `<div class="refs">${refs}</div>` : ""}`;
 }
 
 function renderTranscript() {
@@ -866,9 +1306,22 @@ function fitFrame() {
   Object.assign(frame.style, { width: `${Math.floor(w)}px`, height: `${Math.floor(h)}px` });
   frame.classList.toggle("portrait", S.portrait);
   frame.classList.toggle("landscape", !S.portrait);
-  // ~54 px su 1080 di larghezza in verticale; ~49 px su 1080 di altezza in orizzontale
-  const cap = S.portrait ? w * 0.05 : h * 0.045;
+  // senza brand: ~54 px su 1080 di larghezza in verticale; ~49 px su 1080 di altezza in orizzontale
+  const style = styleFor(S.brand);
+  const pct = S.look ? S.look.captions.size_pct / 100 : style ? style.size_pct / 100 : S.portrait ? 0.05 : 0.045;
+  const cap = S.portrait ? w * pct : h * pct;
   frame.style.setProperty("--cap-size", `${cap.toFixed(1)}px`);
+  // valori dei preset pensati su 1080 px di larghezza (o altezza in orizzontale)
+  const unit = (S.portrait ? w : h) / 1080;
+  if (S.look) {
+    frame.style.setProperty("--cap-stroke", `${(S.look.captions.stroke_px * unit * 2).toFixed(1)}px`);
+    if (S.look.hook) {
+      frame.style.setProperty("--hook-size", `${((S.portrait ? w : h) * S.look.hook.size_pct / 100).toFixed(1)}px`);
+      frame.style.setProperty("--hook-stroke", `${(S.look.hook.stroke_px * unit * 2).toFixed(1)}px`);
+      frame.style.setProperty("--hook-top", `${S.look.hook.center_pct}%`);
+    }
+  }
+  frame.style.setProperty("--lt-size", `${(S.portrait ? w * 0.034 : h * 0.03).toFixed(1)}px`);
 }
 
 function jumpCut(dir) {
@@ -966,7 +1419,17 @@ function wireEvents() {
     const b = e.target.closest("button[data-ltab]");
     if (b) { S.leftTab = b.dataset.ltab; renderLeft(); }
   });
+  $("#brand-select").addEventListener("change", (e) =>
+    mutate("/api/brand", { id: e.target.value || null }, e.target.value ? "Brand applicato" : "Brand rimosso"));
+  $("#style-select").addEventListener("change", (e) =>
+    mutate("/api/style", { id: e.target.value || null }, e.target.value ? "Stile applicato" : "Stile rimosso"));
   $("#left-content").addEventListener("click", (e) => {
+    const card = e.target.closest(".brand-card[data-brand]");
+    if (card) {
+      const id = card.dataset.brand || null;
+      if ((id ?? "") !== S.brandKey) mutate("/api/brand", { id }, id ? "Brand applicato" : "Brand rimosso");
+      return;
+    }
     const w = e.target.closest(".w[data-t]");
     if (w) { seekMs(Number(w.dataset.t)); return; }
     const g = e.target.closest(".gap[data-dec]");
@@ -1042,6 +1505,24 @@ async function onRightClick(e) {
     } else if (act === "gen-idea") {
       const s = S.suggestions[Number(btn.dataset.i)];
       await sendAi(s.prompt, s.kind, S.suggestAt);
+    } else if (act === "pop-suggest") {
+      await popupAi("/api/popups/suggest", {}, "Claude sta leggendo tutto il parlato e sceglie dove servono pop-up…");
+    } else if (act === "pop-chat") {
+      const prompt = $("#pop-prompt").value.trim();
+      if (!prompt) { toast("Scrivi cosa vuoi cambiare", true); return; }
+      await popupAi("/api/popups/chat", { prompt, time_ms: Math.round(nowMs()) }, "Claude sta modificando i pop-up…");
+    } else if (act?.startsWith("pop-")) {
+      const p = (S.data.popups ?? []).find((x) => x.id === id);
+      if (!p) return;
+      if (act === "pop-go") { seekMs(p.at_ms - 300); return; }
+      if (act === "pop-gen") {
+        if (!confirm("Generare l'immagine con Higgsfield? Usa crediti (circa 2 per un'immagine).")) return;
+        await mutate("/api/popups/generate", { id }, "Immagine in generazione");
+        return;
+      }
+      const map = { "pop-approve": "approve", "pop-reject": "reject", "pop-reset": "reset", "pop-delete": "delete" };
+      if (act === "pop-sound") await mutate("/api/popups/item", { id, action: "update", fields: { sound: !p.sound } });
+      else if (map[act]) await mutate("/api/popups/item", { id, action: map[act] });
     } else if (act === "retry-ai") {
       await mutate("/api/ai-requests/run", { id }, "Richiesta rimandata a Claude");
     } else if (act === "recheck") {

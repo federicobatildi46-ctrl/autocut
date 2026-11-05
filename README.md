@@ -62,14 +62,64 @@ d'onda, poi apre `http://127.0.0.1:8765/`. Layout in stile CapCut:
   1080), max 4 parole e 2 righe, dentro l'area sicura (Meta: 14% sopra, 35% sotto, 6% ai
   lati; più margine a destra per i pulsanti TikTok). Pulsante *Area sicura* per vederla.
 
+### Brand pack
+
+`brands/<id>/brand.json`: palette, font (Google Fonts o locali), stile dei sottotitoli con
+parola chiave evidenziata, lower third, stile grafico, transizioni e livelli del sound. Si sceglie
+dal menu **Brand** in alto (salvato per progetto); la scheda **Brand** a sinistra lo mostra.
+Il brand attivo viene passato anche a Claude quando suggerisce o genera con Higgsfield.
+Esempi: `federico` (premium tech scuro) e `editoriale-chiaro`. Dettagli in `brands/README.md`.
+
+### Preset di stile (Premium / Viral)
+
+`styles/<id>/style.json`: la grammatica del montaggio, separata dal brand (brand × stile si
+combinano liberamente). Ritmo e punch-in, look del colore, sottotitoli (posizione, grandezza,
+gerarchia, animazione), hook-copertina dei primi 3 s (centrato: aggancio piccolo, riga GRANDE,
+sottotitolo), card dei pop-up, suoni. Si sceglie dal menu **Stile** in alto.
+- `premium`: camera fissa, look cinematografico, parola chiave bold su una riga sua, card di
+  vetro, grafiche che possono passare *dietro* la persona.
+- `viral`: jump cut con zoom secchi, colori saturi, sottotitoli piccoli e bassi in minuscolo,
+  emoji e sticker.
+
+Anteprima sul video vero, renderizzata con Remotion (zero crediti):
+```
+uv run autocut style-preview <nome> --at 39.8 --style viral --hook "A 25 anni|MOLLO TUTTO|e vado in Thailandia"
+uv run autocut style-preview <nome> --at 22.5 --before 0 --after 18 --style premium --clip
+```
+PNG o MP4 in `projects/<nome>/renders/`.
+
+### Pop-up
+
+`projects/<nome>/popups.json`: elementi che compaiono quando dici una parola (immagine, emoji,
+numero/parola), con posizione (`side`, `above`, `pair`, `center`, `top`, `behind`) e grandezza.
+Quando scegli uno stile, Claude analizza il parlato e li propone da solo, con parsimonia (tetto
+in base alla durata e distanza minima). Nella scheda **Pop-up** li approvi/rifiuti, accendi o
+spegni il suono, generi le immagini con Higgsfield (solo su conferma: costa crediti) e chiedi
+modifiche in chat. Le grafiche `behind` usano una sagoma della persona calcolata in locale con
+MediaPipe (ambiente separato Python 3.12, scaricato da `uv` la prima volta).
+
+### Sound design
+
+Skill di progetto `autocut-sound-design` (`.claude/skills/`), basata sulle regole in
+`UE-Sound-Design-Claude-Training-COMPLETE.md` (documento locale, non versionato). Libreria suoni
+in `library/sfx/` (non versionata): `whooshes/`, `textures/`, `risers/`, `hits/`, `music/`.
+`autocut sfx generate` crea con ElevenLabs tutti i suoni del documento (30 tipi, 71 varianti,
+~4.700 crediti) e scrive `library/sfx/catalog.json`; vedi `library/README.md`.
+
+Nel render la voce viene portata a −14 LUFS e ogni effetto sta 15–20 dB sotto la voce
+(`relative_db` dello stile). I suoni partono solo sui momenti chiave: hook, pop-up con il suono
+acceso, una parola chiave ogni tanto, veri cambi di blocco. Il picco è allineato al fotogramma
+in cui l'elemento compare. Con il piano gratuito ElevenLabs i suoni non si possono usare per
+lavori commerciali: per i clienti serve un piano a pagamento (poi `autocut sfx generate --force`).
+
 ### Motion graphics (Remotion)
 
 In `motion/` c'è un progetto Remotion 4 (Node richiesto). `npm install` una volta, poi
 `npm run studio` per l'anteprima. Remotion è gratuito per singoli e aziende fino a 3 persone;
 oltre serve la licenza aziendale.
 
-L'editor scrive solo `overrides.json`, `editor_state.json` (proposte riviste) e
-`ai_requests.json`. Rilanciando `cuts`, le scelte senza più una proposta diventano orfane.
+L'editor scrive solo `overrides.json`, `editor_state.json` (proposte riviste, brand, stile),
+`ai_requests.json` e `popups.json`. Rilanciando `cuts`, le scelte senza più una proposta diventano orfane.
 
 ### Pause
 

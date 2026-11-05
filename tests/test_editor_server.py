@@ -16,7 +16,11 @@ GAP = "gap:w000002-w000003"
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def client(tmp_path):
+    return make_client(tmp_path)
+
+
+def make_client(tmp_path, **app_kwargs):
     pdir = tmp_path / "episodio-12"
     pdir.mkdir()
     shutil.copy(FIXTURE, pdir / "timeline.json")
@@ -38,18 +42,21 @@ def client(tmp_path, monkeypatch):
         waveform=wave,
     )
 
+    agent = FakeAgent()
     queue = AiQueue(
         pdir,
         media,
         project="episodio-12",
         portrait=False,
         words=lambda: [],
-        agent=FakeAgent(),
+        agent=agent,
         executor=SyncExecutor(),
         downloader=fake_download,
         frame_grabber=fake_grab,
     )
-    return TestClient(create_app(pdir, media, queue=queue)), pdir
+    test_client = TestClient(create_app(pdir, media, queue=queue, **app_kwargs))
+    test_client.fake_agent = agent
+    return test_client, pdir
 
 
 def fake_grab(proxy_path, seconds, dest):
@@ -181,6 +188,59 @@ def test_ai_suggest_and_status(client):
     assert res["suggestions"][0]["title"] == "Spiaggia"
     assert res["frame"] == "/media/ai/suggest-1300.jpg"
     assert c.get("/api/ai-status").json()["higgsfield"] == "connected"
+
+
+def test_brand_selection_is_saved_and_keeps_reviews(client):
+    c, pdir = client
+    p = c.get("/api/project").json()
+    assert p["brand"] is None
+    assert {b["id"] for b in p["brands"]} >= {"federico", "editoriale-chiaro"}
+
+    c.post("/api/decision", json={"id": GAP, "action": "accept"})
+    p = c.post("/api/brand", json={"id": "federico"}).json()
+    assert p["brand"]["id"] == "federico"
+    assert p["brand"]["google_fonts_url"].startswith("https://fonts.googleapis.com/")
+    assert next(d for d in p["decisions"] if d["id"] == GAP)["reviewed"] is True
+
+    c.post("/api/decision", json={"id": GAP, "action": "reset"})  # riscrive lo stato
+    state = json.loads((pdir / "editor_state.json").read_text(encoding="utf-8"))
+    assert state["brand"] == "federico" and state["reviewed"] == []
+
+    assert c.post("/api/brand", json={"id": "nessuno"}).status_code == 404
+    assert c.post("/api/brand", json={"id": None}).json()["brand"] is None
+
+
+def test_brand_is_passed_to_claude(client):
+    c, _ = client
+    c.post("/api/ai-suggest", json={"time_ms": 0})
+    assert c.fake_agent.calls[-1][1].brand == ""  # nessun brand scelto
+
+    c.post("/api/brand", json={"id": "federico"})
+    c.post("/api/ai-suggest", json={"time_ms": 0})
+    assert "Federico Batildi" in c.fake_agent.calls[-1][1].brand
+    c.post("/api/ai-requests", json={"time_ms": 0, "prompt": "titolo", "kind": "graphic"})
+    kind, ctx = c.fake_agent.calls[-1][0], c.fake_agent.calls[-1][1]
+    assert kind == "generate" and "#2f6bff" in ctx.brand
+
+
+def test_style_is_combined_with_brand_and_given_to_claude(client):
+    c, pdir = client
+    p = c.get("/api/project").json()
+    assert p["style"] is None and {s["id"] for s in p["styles"]} == {"premium", "viral"}
+
+    c.post("/api/brand", json={"id": "federico"})
+    p = c.post("/api/style", json={"id": "viral"}).json()
+    assert p["style"]["style"] == "viral" and p["style"]["brand"] == "federico"
+    assert p["style"]["captions"]["emphasis"]["color"] == "#F6B25A"  # highlight del brand
+    state = json.loads((pdir / "editor_state.json").read_text(encoding="utf-8"))
+    assert state["style"] == "viral" and state["brand"] == "federico"
+
+    c.post("/api/ai-suggest", json={"time_ms": 0})
+    ctx = c.fake_agent.calls[-1][1].brand
+    assert "Federico Batildi" in ctx and "Viral provinciale" in ctx and "Sticker" in ctx
+
+    assert c.post("/api/style", json={"id": "boh"}).status_code == 404
+    assert c.post("/api/style", json={"id": None}).json()["style"] is None
 
 
 def test_media_and_static(client):

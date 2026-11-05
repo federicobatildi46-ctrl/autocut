@@ -86,6 +86,7 @@ class AiQueue:
         self.executor = executor or ThreadPoolExecutor(max_workers=2)
         self.downloader = downloader
         self.grab = frame_grabber
+        self.brand: Callable[[], str] = lambda: ""  # descrizione del brand attivo per Claude
         self.lock = threading.Lock()
         self._mark_interrupted()
 
@@ -142,6 +143,7 @@ class AiQueue:
             rel_ms=time_ms - self.media.offset_ms,
             portrait=self.portrait,
             transcript=" ".join(near),
+            brand=self.brand(),
             project=self.project,
         )
 

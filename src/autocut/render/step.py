@@ -1,0 +1,141 @@
+"""Comando `autocut style-preview`: brand × stile su pochi secondi del video vero."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from ..brands import list_brands
+from ..ingest.fingerprint import fingerprint
+from ..models.io import read_model
+from ..models.timeline import Timeline
+from ..overrides import store
+from ..overrides.resolve import effective_ranges
+from ..paths import TIMELINE_FILE, project_dir
+from ..styles import list_styles, resolve_look
+from .preview import (
+    RenderError,
+    build_props,
+    ensure_masks,
+    ensure_source,
+    run_remotion,
+    sfx_loudness,
+    stage_sounds,
+    to_out,
+    voice_gain_db,
+)
+
+STATE_FILE = "editor_state.json"
+
+
+@dataclass(frozen=True)
+class PreviewResult:
+    output: Path
+    style: str
+    brand: str | None
+    frame: int | None
+    duration_ms: int
+    sounds: int
+
+
+def run_style_preview(
+    name: str,
+    *,
+    style_id: str | None,
+    brand_id: str | None,
+    at_ms: int,
+    before_ms: int = 2000,
+    after_ms: int = 2000,
+    hook: str | None = None,
+    clip: bool = False,
+    projects_root: Path | None = None,
+    styles_root: Path | None = None,
+    brands_root: Path | None = None,
+    log: Callable[[str], None] = lambda s: None,
+) -> PreviewResult:
+    pdir = project_dir(name, None, projects_root)
+    tl_path = pdir / TIMELINE_FILE
+    if not tl_path.exists():
+        raise RenderError(f"nessuna timeline in {pdir}: lancia prima ingest, transcribe e cuts")
+    tl = read_model(tl_path, Timeline)
+    state_path = pdir / STATE_FILE
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+
+    styles = {s.id: s for s in list_styles(styles_root)}
+    sid = style_id or state.get("style")
+    if sid not in styles:
+        raise RenderError(
+            f"stile {sid!r} non trovato (disponibili: {', '.join(styles) or 'nessuno'})"
+        )
+    brands = {b.id: b for b in list_brands(brands_root)}
+    bid = brand_id if brand_id is not None else state.get("brand")
+    if bid and bid not in brands:
+        raise RenderError(f"brand {bid!r} non trovato in brands/")
+    brand = brands.get(bid) if bid else None
+    style = styles[sid]
+    v = tl.sources.camera.video
+    look = resolve_look(style, brand, portrait=v.display_height >= v.display_width)
+
+    cam = tl.sources.camera
+    src = Path(cam.path_hint) if cam.path_hint else None
+    if src is None or not src.is_file():
+        raise RenderError(f"file camera non trovato: {cam.path_hint} (rilancia ingest)")
+    if fingerprint(src) != cam.fingerprint:
+        raise RenderError(f"{cam.file_name} è cambiato dall'ingest: rilancia ingest")
+
+    start = max(0, at_ms - before_ms)
+    end = min(cam.duration_ms, at_ms + after_ms)
+    ov = store.load(pdir, tl)
+    ov, _, _ = store.reconcile(ov, tl)
+    eff = effective_ranges(tl, ov)
+
+    work = pdir / "work"
+    gain = voice_gain_db(work, tl, src, look["sound"]["voice_lufs"])
+    span = f"{start / 1000:.1f}-{end / 1000:.1f} s"
+    log(f"estratto {span} dal raw (solo lettura), voce {gain:+.1f} dB...")
+    source = ensure_source(work, tl, src, start, end, gain_db=gain)
+    props, pieces = build_props(
+        project_dir=pdir,
+        tl=tl,
+        eff=eff,
+        look=look,
+        window=(start, end),
+        source_rel=source.relative_to(work).as_posix(),
+        hook_text=hook if hook is not None else state.get("hook"),
+        loudness=sfx_loudness,
+    )
+    stage_sounds(props["sounds"], work)
+    if any(c.get("placement") == "behind" for c in props["cards"]):
+        log("sagoma della persona per le grafiche dietro (MediaPipe, in locale)...")
+        masks, count = ensure_masks(source)
+        props["video"]["masks"] = {"dir": masks.relative_to(work).as_posix(), "count": count}
+    for s in props["sounds"]:
+        at = s["event_ms"] / 1000
+        log(f"  suono {at:5.2f} s  {s['type']:<24} {s['gain_db']:+.1f} dB  {s['reason']}")
+
+    tag = f"{sid}{'-' + bid if bid else ''}-{at_ms // 100 / 10:g}s"
+    renders = pdir / "renders"
+    frame = None
+    if clip:
+        out = renders / f"style-{tag}.mp4"
+        log(f"render della clip con Remotion ({props['durationInFrames']} fotogrammi)...")
+    else:
+        at_out = to_out(pieces, at_ms)
+        if at_out is None:  # l'istante cade in un taglio: prende il primo tratto dopo
+            at_out = next(
+                (p.out_start for p in pieces if p.src_start >= at_ms), pieces[-1].out_start
+            )
+        frame = min(props["durationInFrames"] - 1, round(at_out / 1000 * props["fps"]))
+        out = renders / f"style-{tag}.png"
+        log(f"fotogramma {frame} con Remotion...")
+    run_remotion(props, work / "render" / f"props-{tag}.json", out, work, frame=frame)
+    return PreviewResult(
+        output=out,
+        style=sid,
+        brand=bid,
+        frame=frame,
+        duration_ms=round(props["durationInFrames"] / props["fps"] * 1000),
+        sounds=len(props["sounds"]),
+    )

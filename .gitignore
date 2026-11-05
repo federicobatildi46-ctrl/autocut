@@ -14,10 +14,22 @@ raw/
 *.flac
 *.mp3
 *.m4a
+*.aif
+*.aiff
+*.ogg
+*.zip
+*.rar
+*.7z
 
-# Skill Higgsfield installate con `npx skills add` (si ripristinano da skills-lock.json)
+# Skill installate con `npx skills add` (si ripristinano da skills-lock.json);
+# le skill nostre (autocut-*) invece sono versionate
 .agents/
-.claude/skills/
+.claude/skills/*
+!.claude/skills/autocut-*/
+
+# Libreria condivisa di suoni/asset: solo il README è versionato
+library/*
+!library/README.md
 
 # Remotion
 motion/node_modules/

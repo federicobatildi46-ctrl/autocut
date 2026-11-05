@@ -9,6 +9,7 @@ Legge timeline.json (mai modificata dall'editor) e scrive soltanto:
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +18,15 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .. import popups as pops
+from ..brands import BrandError, BrandPack, list_brands
 from ..models.io import read_model
 from ..models.overrides import OverridesFile
 from ..models.timeline import Segment, Timeline
 from ..overrides import store
 from ..overrides.resolve import effective_ranges, kept_ms
-from ..paths import TIMELINE_FILE
+from ..paths import REPO_ROOT, TIMELINE_FILE
+from ..styles import StyleError, StylePreset, list_styles, resolve_look
 from .agent import AgentError, ClaudeAgent
 from .ai_jobs import AiQueue
 from .media import EditorMedia
@@ -63,6 +67,29 @@ class SuggestBody(BaseModel):
     time_ms: int
 
 
+class BrandBody(BaseModel):
+    id: str | None = None  # None = nessun brand (anteprima base)
+
+
+class StyleBody(BaseModel):
+    id: str | None = None  # None = nessuno stile (solo brand)
+
+
+class PopupChatBody(BaseModel):
+    prompt: str
+    time_ms: int
+
+
+class PopupItemBody(BaseModel):
+    id: str
+    action: str  # approve | reject | reset | delete | update
+    fields: dict[str, Any] = {}
+
+
+class PopupGenBody(BaseModel):
+    id: str
+
+
 def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -93,6 +120,10 @@ def create_app(
     *,
     agent: ClaudeAgent | None = None,
     queue: AiQueue | None = None,
+    brands_root: Path | None = None,
+    styles_root: Path | None = None,
+    repo_root: Path = REPO_ROOT,
+    auto_popups: bool = False,
 ) -> FastAPI:
     app = FastAPI(title="autocut editor", docs_url=None, redoc_url=None)
 
@@ -129,8 +160,14 @@ def create_app(
             store.save(project_dir, reconciled)
         return reconciled
 
+    def state() -> dict[str, Any]:
+        return _read_json(state_path, {})
+
+    def update_state(**fields: Any) -> None:
+        _write_json(state_path, {**state(), **fields})
+
     def reviewed() -> set[str]:
-        return set(_read_json(state_path, {}).get("reviewed", []))
+        return set(state().get("reviewed", []))
 
     def set_reviewed(decision_id: str | list[str], value: bool) -> None:
         ids = [decision_id] if isinstance(decision_id, str) else decision_id
@@ -139,7 +176,175 @@ def create_app(
             current.update(ids)
         else:
             current.difference_update(ids)
-        _write_json(state_path, {"reviewed": sorted(current)})
+        update_state(reviewed=sorted(current))
+
+    def brands() -> dict[str, BrandPack]:
+        return {b.id: b for b in list_brands(brands_root)}
+
+    def current_brand() -> BrandPack | None:
+        return brands().get(state().get("brand") or "")
+
+    def brand_payload(b: BrandPack) -> dict[str, Any]:
+        return {
+            **b.model_dump(mode="json"),
+            "google_fonts_url": b.google_fonts_url(),
+            "reference_images": [f"/media/ref/{b.id}/{i}" for i in range(len(reference_images(b)))],
+        }
+
+    def reference_images(b: BrandPack) -> list[Path]:
+        found: list[Path] = []
+        for ref in b.graphics.references:
+            base = (repo_root / ref).resolve()
+            if not base.is_relative_to(repo_root.resolve()):
+                continue
+            if base.is_file():
+                found.append(base)
+            elif base.is_dir():
+                found += sorted(
+                    p
+                    for p in base.iterdir()
+                    if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+                )
+        return found[:24]
+
+    def styles() -> dict[str, StylePreset]:
+        return {s.id: s for s in list_styles(styles_root)}
+
+    def current_style() -> StylePreset | None:
+        return styles().get(state().get("style") or "")
+
+    portrait = cam_video.display_height >= cam_video.display_width
+
+    def look() -> dict[str, Any] | None:
+        s = current_style()
+        return resolve_look(s, current_brand(), portrait=portrait) if s else None
+
+    def ai_context() -> str:
+        parts = []
+        if b := current_brand():
+            parts.append(b.summary_for_ai())
+        if s := current_style():
+            parts.append(
+                f"Stile di montaggio «{s.name}»: {s.description} Grafiche AI: {s.ai_graphics}"
+            )
+        return " ".join(parts)
+
+    ai.brand = ai_context
+
+    # --- pop-up ----------------------------------------------------------------------
+
+    def word_rows(tl: Timeline) -> list[tuple[str, str, int]]:
+        return [(w.id, w.text, w.start_ms) for w in tl.words if w.kind == "word"]
+
+    def popups_file() -> pops.PopupsFile:
+        """Stato dei pop-up: la prima volta aggiunge le proposte automatiche; collega le
+        immagini Higgsfield appena pronte ai pop-up che le aspettavano."""
+        data = pops.load(project_dir)
+        sid = state().get("style")
+        changed = (sid or "") not in data.seeded_styles
+        data = pops.seed_from_ai_requests(data, project_dir, sid)
+        done = {
+            r["id"]: r
+            for r in ai.requests()
+            if r.get("status") == "done" and (r.get("result") or {}).get("local")
+        }
+        items = []
+        for x in data.items:
+            req = done.get(x.ai_request or "")
+            if req and not x.image:
+                name = req["result"]["local"][0].rsplit("/", 1)[-1]
+                x = x.model_copy(update={"image": f"ai/results/{name}"})
+                changed = True
+            items.append(x)
+        data = data.model_copy(update={"items": items})
+        if changed:
+            pops.save(project_dir, data)
+        return data
+
+    def popups_payload() -> list[dict[str, Any]]:
+        reqs = {r["id"]: r for r in ai.requests()}
+        sid = state().get("style")
+        out = []
+        for x in pops.sorted_items(popups_file()):
+            if not x.visible_for(sid):
+                continue  # proposte fatte per un altro stile
+            d = x.model_dump(mode="json")
+            d["image_url"] = (
+                "/media/ai/results/" + x.image.rsplit("/", 1)[-1]
+                if x.image and x.image.startswith("ai/results/")
+                else None
+            )
+            d["image_status"] = (reqs.get(x.ai_request or "") or {}).get("status")
+            out.append(d)
+        return out
+
+    def edited_ms() -> int:
+        tl = timeline()
+        return kept_ms(effective_ranges(tl, overrides(tl)))
+
+    def popup_prompt(request: str | None = None, time_ms: int = 0) -> str:
+        s = current_style()
+        common = {
+            "style_id": s.id if s else None,
+            "style_name": s.name if s else "nessuno (usa la logica premium)",
+            "words": word_rows(timeline()),
+            "data": popups_file(),
+            "duration_ms": edited_ms(),
+        }
+        if request is None:
+            return pops.suggest_prompt(**common)
+        return pops.chat_prompt(**common, request=request, time_ms=time_ms)
+
+    popup_lock = threading.Lock()
+
+    def run_popup_ops(prompt: str, *, automatic: bool) -> str:
+        """Chiede a Claude le operazioni sui pop-up e le applica. Le proposte automatiche
+        rispettano i limiti di parsimonia dello stile; le richieste in chat no (le chiedi tu)."""
+        sid = state().get("style")
+        try:
+            ops = ai.agent.ask_json(prompt)
+        except AgentError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        words = {wid: ms for wid, _, ms in word_rows(timeline())}
+        count, gap = pops.limits(sid, edited_ms())
+        with popup_lock:
+            current = popups_file()
+            try:
+                new, log = pops.apply_ops(
+                    current, ops, "ai", words=words, style=sid,
+                    min_gap_ms=gap if automatic else 0, max_count=count if automatic else None,
+                )  # fmt: skip
+            except pops.PopupError as exc:
+                raise HTTPException(502, f"proposta di Claude non valida: {exc}") from exc
+            if automatic and sid and sid not in new.suggested:
+                new = new.model_copy(update={"suggested": [*new.suggested, sid]})
+            pops.save(project_dir, new)
+        msg = str(ops.get("message") or "").strip()
+        skipped = [x for x in log if x.startswith("saltato")]
+        if skipped:
+            msg += f" ({len(skipped)} proposte scartate per non affollare il video.)"
+        return msg.strip() or (", ".join(log) if log else "Nessuna modifica.")
+
+    popup_job: dict[str, Any] = {}
+
+    def maybe_auto_suggest() -> None:
+        """Appena scegli uno stile, Claude propone da solo i pop-up (una volta per stile)."""
+        sid = state().get("style")
+        if not auto_popups or not sid or popup_job.get("status") == "running":
+            return
+        if sid in popups_file().suggested or popup_job.get(f"failed:{sid}"):
+            return
+        popup_job.update(status="running", style=sid, message=None)
+
+        def work() -> None:
+            try:
+                msg = run_popup_ops(popup_prompt(), automatic=True)
+                popup_job.update(status="done", message=msg)
+            except HTTPException as exc:
+                popup_job.update(status="error", message=str(exc.detail))
+                popup_job[f"failed:{sid}"] = True
+
+        threading.Thread(target=work, daemon=True).start()
 
     def payload() -> dict[str, Any]:
         tl = timeline()
@@ -214,6 +419,16 @@ def create_app(
                 "waveform_url": "/media/waveform",
             },
             "ai_requests": ai.requests(),
+            "brand": brand_payload(b) if (b := current_brand()) else None,
+            "brands": [{"id": b.id, "name": b.name} for b in brands().values()],
+            "style": look(),
+            "styles": [
+                {"id": s.id, "name": s.name, "description": s.description}
+                for s in styles().values()
+            ],
+            "hook": state().get("hook"),
+            "popups": popups_payload(),
+            "popup_job": {k: v for k, v in popup_job.items() if not k.startswith("failed:")},
         }
 
     def fail(exc: Exception) -> HTTPException:
@@ -221,7 +436,36 @@ def create_app(
 
     @app.get("/api/project")
     def get_project() -> JSONResponse:
+        maybe_auto_suggest()
+        try:
+            return JSONResponse(payload())
+        except BrandError as exc:
+            raise HTTPException(500, f"brand pack non valido: {exc}") from exc
+        except StyleError as exc:
+            raise HTTPException(500, f"preset di stile non valido: {exc}") from exc
+
+    @app.post("/api/brand")
+    def post_brand(body: BrandBody) -> JSONResponse:
+        if body.id is not None and body.id not in brands():
+            raise HTTPException(404, f"brand {body.id!r} non trovato in brands/")
+        update_state(brand=body.id)
         return JSONResponse(payload())
+
+    @app.post("/api/style")
+    def post_style(body: StyleBody) -> JSONResponse:
+        if body.id is not None and body.id not in styles():
+            raise HTTPException(404, f"stile {body.id!r} non trovato in styles/")
+        update_state(style=body.id)
+        maybe_auto_suggest()
+        return JSONResponse(payload())
+
+    @app.get("/media/ref/{brand_id}/{index}")
+    def brand_ref(brand_id: str, index: int) -> FileResponse:
+        b = brands().get(brand_id)
+        images = reference_images(b) if b else []
+        if not 0 <= index < len(images):
+            raise HTTPException(404)
+        return FileResponse(images[index])
 
     @app.post("/api/decision")
     def post_decision(body: DecisionBody) -> JSONResponse:
@@ -297,6 +541,56 @@ def create_app(
             return JSONResponse(ai.suggest(body.time_ms))
         except AgentError as exc:
             raise HTTPException(502, str(exc)) from exc
+
+    @app.post("/api/popups/suggest")
+    def popups_suggest() -> JSONResponse:
+        msg = run_popup_ops(popup_prompt(), automatic=True)
+        return JSONResponse({**payload(), "popup_message": msg})
+
+    @app.post("/api/popups/chat")
+    def popups_chat(body: PopupChatBody) -> JSONResponse:
+        if not body.prompt.strip():
+            raise HTTPException(400, "scrivi cosa vuoi cambiare")
+        msg = run_popup_ops(popup_prompt(body.prompt.strip(), body.time_ms), automatic=False)
+        return JSONResponse({**payload(), "popup_message": msg})
+
+    @app.post("/api/popups/item")
+    def popups_item(body: PopupItemBody) -> JSONResponse:
+        data = popups_file()
+        if not any(x.id == body.id for x in data.items):
+            raise HTTPException(404, f"pop-up {body.id} non trovato")
+        status = {"approve": "approved", "reject": "rejected", "reset": "proposed"}
+        if body.action in status:
+            ops: dict[str, Any] = {"update": [{"id": body.id, "status": status[body.action]}]}
+        elif body.action == "delete":
+            ops = {"remove": [body.id]}
+        elif body.action == "update":
+            ops = {"update": [{**body.fields, "id": body.id}]}
+        else:
+            raise HTTPException(400, f"azione {body.action!r} sconosciuta")
+        words = {wid: ms for wid, _, ms in word_rows(timeline())}
+        try:
+            new, _ = pops.apply_ops(data, ops, "user", words=words)
+        except pops.PopupError as exc:
+            raise fail(exc) from exc
+        pops.save(project_dir, new)
+        return JSONResponse(payload())
+
+    @app.post("/api/popups/generate")
+    def popups_generate(body: PopupGenBody) -> JSONResponse:
+        """Genera con Higgsfield l'immagine di un pop-up (solo su richiesta: costa crediti)."""
+        data = popups_file()
+        item = next((x for x in data.items if x.id == body.id), None)
+        if item is None:
+            raise HTTPException(404, f"pop-up {body.id} non trovato")
+        if not item.image_prompt:
+            raise HTTPException(400, "questo pop-up non ha un prompt per l'immagine")
+        req = ai.add(item.at_ms, item.image_prompt, "image")
+        new, _ = pops.apply_ops(
+            data, {"update": [{"id": item.id, "ai_request": req["id"], "image": None}]}, "user"
+        )
+        pops.save(project_dir, new)
+        return JSONResponse(payload())
 
     @app.post("/api/ai-requests")
     def post_ai(body: AiBody) -> JSONResponse:
