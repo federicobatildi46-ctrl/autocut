@@ -15,6 +15,17 @@ raw/
 *.mp3
 *.m4a
 
+# Skill Higgsfield installate con `npx skills add` (si ripristinano da skills-lock.json)
+.agents/
+.claude/skills/
+
+# Remotion
+motion/node_modules/
+motion/out/
+
+# Configurazione locale di anteprima (Claude Code)
+.claude/launch.json
+
 # Python / tooling
 .venv/
 __pycache__/

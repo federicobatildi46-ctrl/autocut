@@ -1,4 +1,4 @@
-"""CLI di autocut. Passi disponibili: ingest, transcribe. In arrivo: sync, cuts, repeats, raw."""
+"""CLI di autocut: ingest, transcribe, cuts, editor. In arrivo: sync, repeats, raw."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from typing import Annotated
 import typer
 
 from .cuts.step import CutsError, run_cuts
+from .editor.launch import EditorError
+from .editor.media import MediaError
 from .env import API_KEY_VAR, api_key
 from .ingest.classify import AmbiguousClassification
 from .ingest.probe import ProbeError
@@ -184,7 +186,32 @@ def cuts(
             f"raw {st.raw_ms / 1000:.2f} s -> tenuti {st.kept_ms / 1000:.2f} s, "
             f"tolti {st.removed_ms / 1000:.2f} s ({100 * st.removed_ms / st.raw_ms:.0f}%)"
         )
+    for target in result.orphaned:
+        typer.echo(f"orfano  la tua scelta su {target} non ha più una proposta: non è applicata")
+    for target in result.restored:
+        typer.echo(f"ripreso la tua scelta su {target} torna valida")
     typer.echo(f"scritto {result.timeline_path}")
+
+
+@app.command()
+def editor(
+    name: Annotated[str, typer.Argument(help="Nome del progetto.")],
+    range_: RangeOpt = None,
+    port: Annotated[int, typer.Option("--port", help="Porta locale.")] = 8765,
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Non aprire il browser.")
+    ] = False,
+) -> None:
+    """Apre l'editor visivo in locale (http://127.0.0.1:<porta>)."""
+    from .editor.launch import build, serve
+
+    try:
+        app_, pdir = build(name, range_text=range_, log=lambda s: typer.echo(f"preparo {s}"))
+    except (EditorError, MediaError, RangeError, ProjectNameError) as exc:
+        typer.echo(f"errore: {exc}", err=True)
+        raise typer.Exit(EXIT_ERROR) from None
+    typer.echo(f"editor di {pdir.name} su http://127.0.0.1:{port}/  (Ctrl+C per chiudere)")
+    serve(app_, port=port, open_browser=not no_browser)
 
 
 @app.command("export-schemas")

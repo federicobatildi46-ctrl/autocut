@@ -10,11 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..models.io import read_model, write_model
 from ..models.timeline import Stats, Timeline
+from ..overrides import store as overrides_store
 from ..paths import TIMELINE_FILE, project_dir
 from ..settings import apply_sets
 from ..timeparse import parse_range
@@ -31,6 +32,8 @@ class CutsError(ValueError):
 class CutsResult:
     timeline: Timeline
     timeline_path: Path
+    orphaned: list[str] = field(default_factory=list)
+    restored: list[str] = field(default_factory=list)
 
 
 def _input_hash(tl: Timeline, axis: tuple[int, int]) -> str:
@@ -89,4 +92,13 @@ def run_cuts(
     data["run"]["steps"]["cuts"] = {"input_hash": _input_hash(provisional, axis)}
     updated = Timeline.model_validate(data)
     write_model(tl_path, updated)
-    return CutsResult(timeline=updated, timeline_path=tl_path)
+
+    # Le scelte dell'utente restano in overrides.json: quelle senza più proposta diventano orfane.
+    orphaned: list[str] = []
+    restored: list[str] = []
+    if overrides_store.overrides_path(pdir).exists():
+        ov = overrides_store.load(pdir, updated)
+        ov, orphaned, restored = overrides_store.reconcile(ov, updated)
+        if orphaned or restored:
+            overrides_store.save(pdir, ov)
+    return CutsResult(timeline=updated, timeline_path=tl_path, orphaned=orphaned, restored=restored)

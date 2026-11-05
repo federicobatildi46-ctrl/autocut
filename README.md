@@ -23,9 +23,53 @@ uv run autocut doctor
 | `autocut ingest <nome> <cartella>` | Riconosce camera/schermo e scrive la prima `timeline.json` |
 | `autocut transcribe <nome> [--range] [--force]` | Trascrive l'audio camera con Scribe, con cache |
 | `autocut cuts <nome> [--range] [--set pauses.threshold_ms=900]` | Toglie le pause morte: segmenti tenuti/tolti |
+| `autocut editor <nome> [--port 8765]` | Apre l'editor visivo in locale nel browser |
 | `autocut export-schemas` | Rigenera `schemas/*.schema.json` dai modelli |
 
-In arrivo: `sync`, `repeats`, `overrides`, `validate` e `raw` (tutto il giro).
+In arrivo: `sync`, `repeats`, `validate` e `raw` (tutto il giro).
+
+### Editor visivo (locale)
+
+`autocut editor <nome>` prepara in `projects/<nome>/work/` un proxy H.264 leggero (i raw
+HEVC 10 bit HDR dell'iPhone non sempre si riproducono nel browser), le miniature e la forma
+d'onda, poi apre `http://127.0.0.1:8765/`. Layout in stile CapCut:
+
+- **lettore** con modalità *Montato* (salta le parti tolte) e *Raw*, sottotitoli in anteprima;
+- **timeline** con righello, sottotitoli, striscia video, forma d'onda e tagli (zoom con
+  `Ctrl`+rotella, trascina la testina);
+- **Modifiche AI**: ogni proposta con il commento e il motivo; *Approva*, *Rifiuta, tieni*,
+  *Ascolta* (2 s prima e dopo), *Annulla* (`Ctrl+Z`). Le scelte vanno in `overrides.json`
+  con la cronologia; la timeline non viene mai riscritta;
+- **Potenzia ✦**: *Suggerisci* fa guardare a Claude il frame e il parlato intorno e propone
+  video, immagini o grafiche AI; *Invia* esegue subito la generazione con Higgsfield. L'editor
+  lancia Claude Code in background (`claude -p`, con il tuo account) che usa la skill
+  `higgsfield-generate` e la CLI `higgsfield`, con soli permessi Read, Skill e comandi
+  `higgsfield`. Prima di generare stima il costo e si ferma oltre il tetto (6 crediti per
+  immagini e grafiche, 40 per i video; variabili `AUTOCUT_AI_BUDGET_IMAGE` e
+  `AUTOCUT_AI_BUDGET_VIDEO`). I risultati finiscono in `projects/<nome>/work/ai/results/`
+  e in `ai_requests.json`.
+
+  Una volta per laptop (in PowerShell; `--use-system-ca` serve dietro antivirus/proxy TLS):
+
+  ```bash
+  claude auth login
+  $env:NODE_OPTIONS = "--use-system-ca"; npm i -g @higgsfield/cli
+  higgsfield auth login
+  higgsfield workspace list        # poi: higgsfield workspace set <id>
+  npx -y skills add higgsfield-ai/skills   # nella cartella del repo
+  ```
+- **Sottotitoli di anteprima** (non bruciati): in verticale ~5% della larghezza (54 px su
+  1080), max 4 parole e 2 righe, dentro l'area sicura (Meta: 14% sopra, 35% sotto, 6% ai
+  lati; più margine a destra per i pulsanti TikTok). Pulsante *Area sicura* per vederla.
+
+### Motion graphics (Remotion)
+
+In `motion/` c'è un progetto Remotion 4 (Node richiesto). `npm install` una volta, poi
+`npm run studio` per l'anteprima. Remotion è gratuito per singoli e aziende fino a 3 persone;
+oltre serve la licenza aziendale.
+
+L'editor scrive solo `overrides.json`, `editor_state.json` (proposte riviste) e
+`ai_requests.json`. Rilanciando `cuts`, le scelte senza più una proposta diventano orfane.
 
 ### Pause
 
