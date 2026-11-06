@@ -19,7 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .. import effects as fx
+from .. import emoji as emo
 from .. import popups as pops
+from .. import text_style
 from ..models.timeline import Timeline
 from ..overrides.resolve import EffectiveRange
 from ..paths import REPO_ROOT
@@ -238,7 +241,7 @@ def _timed_words(tl: Timeline, pieces: list[Piece]) -> list[TimedWord]:
         if s is None:
             continue
         e = to_out(pieces, max(w.start_ms, w.end_ms - 1))
-        out.append(TimedWord(w.text, s, (e + 1) if e is not None else s + 200))
+        out.append(TimedWord(w.text, s, (e + 1) if e is not None else s + 200, id=w.id))
     return out
 
 
@@ -386,7 +389,7 @@ def sound_events(
     pop_whole = look["captions"]["animation"] == "pop"
     gap = look["sound"].get("emphasis_gap_ms", 6000)
     marked = [e.at_ms for e in events if e.kind in ("hook", "card_in")]
-    last = -10**9
+    last = -(10**9)
     for c in captions:
         i = c["emphasis"]
         if i < 0:
@@ -434,7 +437,7 @@ def _cards(project_dir: Path, pieces: list[Piece], chunks, look) -> list[dict[st
         if at is None:
             continue  # il punto è in una parte tagliata
         title = item.title
-        if not title and item.kind == "image":
+        if not title and item.kind == "image" and not item.cutout:
             for c in chunks:
                 if c.start_ms - 200 <= at <= c.end_ms + 600 and not c.event:
                     idx = emphasis_index([w.text for w in c.words])
@@ -453,13 +456,49 @@ def _cards(project_dir: Path, pieces: list[Piece], chunks, look) -> list[dict[st
                 "placement": item.placement,
                 "size": item.size,
                 "side": item.side,
+                "x_pct": item.x_pct,
+                "y_pct": item.y_pct,
+                "scale": item.scale,
+                "rotation": item.rotation,
+                "layer": "person" if item.behind_person else item.layer,
+                "cutout": item.cutout,
+                "emoji_imgs": _stage_emoji(project_dir, item.emoji)
+                if item.kind == "emoji"
+                else None,
             }
         )
-    # uno alla volta: stanno nello stesso punto dello schermo, il nuovo sostituisce il vecchio
+    # uno alla volta: le posizioni automatiche stanno nello stesso punto dello schermo, il nuovo
+    # sostituisce il vecchio. Gli sticker messi a mano (free) restano tutti.
     out.sort(key=lambda c: c["from_ms"])
-    for prev, nxt in zip(out, out[1:], strict=False):
+    auto = [c for c in out if c["placement"] != "free"]
+    for prev, nxt in zip(auto, auto[1:], strict=False):
         prev["to_ms"] = min(prev["to_ms"], nxt["from_ms"])
     return [c for c in out if c["to_ms"] - c["from_ms"] >= 300]
+
+
+def _stage_emoji(project_dir: Path, text: str | None) -> list[str] | None:
+    """Emoji stile iPhone (library/emoji): copiate nella cartella pubblica del render."""
+    names = emo.images_for(text or "")
+    if not names:
+        return None  # il render usa il font emoji
+    out = []
+    for name in names:
+        dest = project_dir / "work" / "render" / "emoji" / name
+        if not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(emo.EMOJI_DIR / "apple" / name, dest)
+        out.append("render/emoji/" + name)
+    return out
+
+
+def _retime(text: str, chunk: Any) -> list[dict[str, Any]]:
+    """Testo riscritto a mano: le parole nuove si spalmano sui tempi della frase."""
+    tokens = text.split()
+    starts = [w.start_ms for w in chunk.words]
+    a, b = starts[0], starts[-1]
+    n = len(tokens)
+    step = (b - a) / max(1, n - 1)
+    return [{"text": tok, "from_ms": round(a + step * k)} for k, tok in enumerate(tokens)]
 
 
 def build_props(
@@ -473,9 +512,19 @@ def build_props(
     hook_text: str | None,
     catalog: dict[str, list[dict[str, Any]]] | None = None,
     loudness: Callable[[dict[str, Any]], float | None] = lambda s: None,
+    scenes: dict[str, Any] | None = None,
+    effects: dict[str, Any] | None = None,
+    points: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[Piece]]:
+    """``scenes``: modifiche del pannello Testo per frase (text_style.SceneEdit per id parola).
+    ``effects``: effetti risolti (effects.resolved); ``points``: tagli e cambi di scena."""
     start, end = window
     pieces = pieces_in_window(eff, start, end)
+    effects = effects or fx.resolved(look.get("style"), fx.StyleEffects())
+    # un cambio di scena dentro un tratto tenuto divide il tratto: lì va la transizione
+    for b in points or []:
+        if b["kind"] == "scene" and b["at_ms"] == b["end_ms"] and fx.transition_for(effects, b):
+            pieces = _split(pieces, b["at_ms"])
     if not pieces:
         raise RenderError("nella finestra scelta è tutto tagliato: scegli un altro istante")
     duration = pieces[-1].out_end
@@ -485,16 +534,25 @@ def build_props(
     use_emph = cap["emphasis"] is not None
     captions = []
     for i, c in enumerate(chunks):
-        texts = [w.text for w in c.words]
-        captions.append(
-            {
-                "from_ms": c.start_ms,
-                "to_ms": c.end_ms + 250,
-                "words": [{"text": w.text, "from_ms": w.start_ms} for w in c.words],
-                "emphasis": emphasis_index(texts) if use_emph else -1,
-                "color": cap["colors"][i % len(cap["colors"])],
-            }
-        )
+        edit = (scenes or {}).get(c.words[0].id) if c.words else None
+        cwords = [{"text": w.text, "from_ms": w.start_ms} for w in c.words]
+        if edit is not None and edit.text:
+            cwords = _retime(edit.text, c)
+        texts = [w["text"] for w in cwords]
+        item: dict[str, Any] = {
+            "from_ms": c.start_ms,
+            "to_ms": c.end_ms + 250,
+            "words": cwords,
+            "emphasis": emphasis_index(texts) if use_emph else -1,
+            "color": cap["colors"][i % len(cap["colors"])],
+        }
+        if edit is not None:
+            style = text_style.scene_overrides(cap, edit)
+            if style:
+                item["style"] = style
+                if "colors" in style:
+                    item["color"] = style["colors"][0]
+        captions.append(item)
     hook = None
     hook_end = 0
     if hook_text and look["hook"]:
@@ -523,6 +581,9 @@ def build_props(
         catalog if catalog is not None else _catalog(),
         loudness=loudness,
     )
+    for card in cards:
+        card["anim"] = fx.sticker_anim(effects, card["id"])
+    look = {**look, "captions": {**look["captions"], "anim": effects["captions"]}}
     v = tl.sources.camera.video
     portrait = v.display_height >= v.display_width
     props = {
@@ -544,8 +605,49 @@ def build_props(
         "cards": cards,
         "lowerThird": lower_third,
         "sounds": sounds,
+        "transitions": _transitions(pieces, points or [], effects, end - start),
     }
     return props, pieces
+
+
+def _split(pieces: list[Piece], ms: int) -> list[Piece]:
+    out = []
+    for p in pieces:
+        if p.src_start + 300 < ms < p.src_end - 300:
+            mid = p.out_start + ms - p.src_start
+            out += [Piece(p.src_start, ms, p.out_start), Piece(ms, p.src_end, mid)]
+        else:
+            out.append(p)
+    return out
+
+
+def _transitions(
+    pieces: list[Piece], points: list[dict[str, Any]], effects: dict[str, Any], src_len: int
+) -> list[dict[str, Any]]:
+    """Una transizione per ogni giunta tra due pezzi che ha un effetto. Serve un po' di girato
+    oltre il taglio da entrambe le parti (le "maniglie"): la durata si riduce se non c'è."""
+    by_at = {b["at_ms"]: b for b in points}
+    win_start = pieces[0].src_start - pieces[0].out_start if pieces else 0
+    out = []
+    for i, (a, b) in enumerate(zip(pieces, pieces[1:], strict=False)):
+        point = by_at.get(a.src_end)
+        if point is None:
+            continue
+        t = fx.transition_for(effects, point)
+        if t is None:
+            continue
+        # maniglie: dopo la fine di A e prima dell'inizio di B, dentro l'estratto del raw
+        rel_a_end = a.src_end - win_start
+        rel_b_start = b.src_start - win_start
+        room = min(src_len - rel_a_end, rel_b_start, (a.src_end - a.src_start) // 2,
+                   (b.src_end - b.src_start) // 2)  # fmt: skip
+        ms = min(t["ms"], 2 * max(0, room))
+        if ms < 100:
+            continue
+        out.append(
+            {"join": i, "at_ms": a.out_end, "type": t["type"], "ms": ms, "point": point["id"]}
+        )
+    return out
 
 
 def _npx() -> str:

@@ -12,6 +12,9 @@ dependencies = [
     "truststore>=0.10.5",
     "fastapi>=0.162.0",
     "uvicorn>=0.54.0",
+    "onnxruntime>=1.23",
+    "numpy>=2.2",
+    "pillow>=11",
 ]
 
 [project.scripts]
@@ -48,3 +51,4 @@ select = ["E", "F", "I", "UP", "B"]
 "src/autocut/sound/manifest.py" = ["E501"]
 "src/autocut/render/captions.py" = ["E501"]  # elenco stopword, identico a quello dell'editor
 "src/autocut/popups.py" = ["E501"]  # prompt per Claude
+"src/autocut/effects.py" = ["E501"]  # galleria e prompt per Claude

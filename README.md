@@ -35,6 +35,9 @@ HEVC 10 bit HDR dell'iPhone non sempre si riproducono nel browser), le miniature
 d'onda, poi apre `http://127.0.0.1:8765/`. Layout in stile CapCut:
 
 - **lettore** con modalità *Montato* (salta le parti tolte) e *Raw*, sottotitoli in anteprima;
+- **Schermo intero** (pulsante sotto il lettore, tasto `F` o doppio clic sul video): il montato
+  in grande, a forma di telefono se verticale o 16:9 se orizzontale, con barra di scorrimento,
+  play/pausa, Montato/Raw (in Raw le parti tolte sono in rosso) e sottotitoli; `Esc` per uscire;
 - **timeline** con righello, sottotitoli, striscia video, forma d'onda e tagli (zoom con
   `Ctrl`+rotella, trascina la testina);
 - **Modifiche AI**: ogni proposta con il commento e il motivo; *Approva*, *Rifiuta, tieni*,
@@ -61,6 +64,75 @@ d'onda, poi apre `http://127.0.0.1:8765/`. Layout in stile CapCut:
 - **Sottotitoli di anteprima** (non bruciati): in verticale ~5% della larghezza (54 px su
   1080), max 4 parole e 2 righe, dentro l'area sicura (Meta: 14% sopra, 35% sotto, 6% ai
   lati; più margine a destra per i pulsanti TikTok). Pulsante *Area sicura* per vederla.
+
+### Pannello Testo
+
+Scheda **Testo** a sinistra (e pulsante *Testo* nello schermo intero), con uno stile attivo:
+- **font** da Google Fonts: 14 per *Viral* (Anton, Bebas Neue, Lilita One, Bangers…) e 14 per
+  *Premium* (Playfair Display, Instrument Serif, Inter, Manrope…), visibili in base al preset.
+  *Testo* / *Parola chiave* per mischiare due font (es. un serif sulla parola chiave);
+- **stile** (Contorno, Ombra, Ombra netta, Neon, Box, Pulito), grassetto, corsivo, maiuscole;
+- **colori** del testo, della parola chiave e di contorno/box/neon (tavolozza + colore libero);
+- **testo della scena**: riscrivi la frase sotto la testina (Invio per salvare);
+- **nel video**: clicca il testo, trascinalo, ingrandiscilo dagli angoli, ruotalo con la maniglia
+  sotto (calamita sul centro e su 0°/90°). Anche nello schermo intero.
+
+*Tutti i sottotitoli* o *Solo questa scena* decide dove va la modifica. Le scelte stanno in
+`projects/<nome>/text_style.json`, separate per stile, e il render Remotion le usa uguali.
+
+### Pannello Sticker
+
+Scheda **Sticker** a sinistra (e pulsante *Sticker* nello schermo intero): libreria per stile
+(emoji ed etichette *Viral*, numeri ed emoji sobrie *Premium*, più le tue immagini AI), testo o
+emoji personalizzati. Si aggiungono alla testina, approvati, solo per lo stile attivo.
+Clicca uno sticker nel video (anche i pop-up proposti da Claude) per spostarlo, ingrandirlo
+dagli angoli e ruotarlo; nel pannello: **Dietro al testo / Davanti al testo / Dietro la
+persona**, grandezza, rotazione, durata, *Inizia qui*, suono, *Elimina* (o tasto Canc).
+Gli sticker messi a mano (`placement: "free"`) restano a schermo insieme agli altri.
+
+**Emoji stile iPhone** (`library/emoji/`, fuori da git): tutte le emoji della tastiera (1.653,
+per categorie) estratte dal font Apple Color Emoji a 96 px, usate in editor e render al posto
+del font Noto. **Sono disegni di Apple: solo per uso personale, non nei video dei clienti.**
+Per ricrearle su un altro PC vedi `tools/extract_emoji.py`; senza la cartella si torna al font.
+
+### Pannello Immagini
+
+Scheda **Immagini** a sinistra (e pulsante *Immagini* nello schermo intero): scrivi chi o cosa
+ti serve («trovami delle immagini di Francesco Totti» → cerca «Francesco Totti») e l'editor
+cerca sul web come il browser (Bing Immagini). Clicchi una foto: viene scaricata, **scontornata
+in locale** e messa nel video dove c'è la testina, in basso appoggiata al bordo; poi la sposti,
+la ingrandisci, la ruoti e le dai entrata e uscita come uno sticker. Le immagini le mette solo
+l'utente: Claude non le inserisce mai da solo.
+- **Scontorno** sul processore, gratis e senza account: *Rapida* (ISNet, ~2 s) o *Massima*
+  (BiRefNet leggero, ~20 s, capelli e bordi molto più puliti). Sulla foto selezionata puoi
+  rifarlo in qualità massima o tornare alla *Foto intera*. I modelli (~180 e ~220 MB) si
+  scaricano da soli la prima volta in `library/models/` (fuori da git).
+- Filtri: *Già trasparenti* (solo PNG senza sfondo), *Licenza libera* (Wikimedia Commons, con
+  autore e licenza), *Dal PC* (anche trascinando il file nel pannello).
+- I file stanno in `projects/<nome>/work/images/` (originali in `src/`, provenienza in
+  `index.json`) e restano in **Le tue immagini** per riusarli.
+
+Le foto del web hanno quasi sempre un copyright: per i video da pubblicare preferisci
+*Licenza libera* o foto tue.
+
+### Pannello Effetti
+
+Scheda **Effetti** a sinistra (e pulsante *Effetti* nello schermo intero), tre sezioni:
+- **Testo**: entrata e uscita dei sottotitoli (pop, parola per parola, rimbalzo, macchina da
+  scrivere, emersione, messa a fuoco…), con la durata;
+- **Sticker**: entrata, uscita e loop (galleggia, pulsa, battito, dondola, trema…) per tutti
+  gli sticker o solo per quello selezionato, con durata e velocità;
+- **Transizioni**: a ogni giunta tra due clip (rombo nella timeline) — ufficiali di
+  `@remotion/transitions` (fade, slide, wipe, cube, flip, iris, orologio, push cut) e in stile
+  CapCut (zoom, whip, flash, dissolvenza sfocata, passaggio al nero). I punti vengono da tagli e
+  cambi di inquadratura (differenza tra i fotogrammi, ffmpeg); serve un po' di girato oltre il
+  taglio, quindi la durata si accorcia da sola se manca.
+
+Ogni stile ha la sua galleria (*Premium* morbida, *Viral* d'impatto) e i suoi valori di partenza.
+La prima volta che apri Effetti, Claude compone il preset guardando parlato, tagli e sticker;
+*Fai scegliere a Claude* lo rifà (le transizioni scelte a mano restano). Le scelte stanno in
+`projects/<nome>/effects.json`. Il motore delle animazioni è `motion/src/anim.js`, lo stesso per
+editor e render; nell'anteprima le transizioni sono approssimate, nel render sono quelle vere.
 
 ### Brand pack
 
@@ -119,7 +191,7 @@ In `motion/` c'è un progetto Remotion 4 (Node richiesto). `npm install` una vol
 oltre serve la licenza aziendale.
 
 L'editor scrive solo `overrides.json`, `editor_state.json` (proposte riviste, brand, stile),
-`ai_requests.json` e `popups.json`. Rilanciando `cuts`, le scelte senza più una proposta diventano orfane.
+`ai_requests.json`, `popups.json`, `text_style.json` e `effects.json`. Rilanciando `cuts`, le scelte senza più una proposta diventano orfane.
 
 ### Pause
 

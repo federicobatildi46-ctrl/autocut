@@ -82,6 +82,11 @@ class FakeAgent:
 
     def __init__(self):
         self.calls = []
+        self.json_reply = {}
+
+    def ask_json(self, prompt):
+        self.calls.append(("ask_json", prompt))
+        return self.json_reply
 
     def status(self, refresh=False):
         return {"claude": True, "higgsfield": "connected", "server": self.server}

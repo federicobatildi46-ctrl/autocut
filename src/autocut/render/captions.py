@@ -33,6 +33,7 @@ class TimedWord:
     start_ms: int
     end_ms: int
     kind: str = "word"
+    id: str = ""  # id della parola in timeline.json (chiave delle modifiche di scena)
 
 
 @dataclass

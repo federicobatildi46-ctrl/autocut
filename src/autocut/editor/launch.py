@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import threading
 import webbrowser
 from collections.abc import Callable
@@ -42,6 +43,13 @@ def build(
         raise EditorError(f"{cam.file_name} è cambiato dall'ingest: rilancia ingest")
     media = prepare(pdir, tl, src, log=log)
     return create_app(pdir, media, auto_popups=True), pdir
+
+
+def port_busy(port: int) -> bool:
+    """True se su 127.0.0.1:port c'è già qualcosa in ascolto (es. un editor vecchio acceso)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def serve(app, *, port: int, open_browser: bool) -> None:

@@ -14,21 +14,30 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
+import { linearTiming, TransitionSeries } from "@remotion/transitions";
+import { animCss, animState, wordState } from "./anim.js";
+import { presentationFor } from "./transitions";
 
 // Render di un pezzo di video con il look brand × stile (props da autocut style-preview).
 // Tutti i tempi delle props sono ms sul montato (0 = inizio del pezzo).
 
 type Emphasis = { font: string | null; weight: number | null; italic: boolean; color: string; scale: number; layout: "line" | "inline" };
+// Campi dei sottotitoli; quelli in fondo arrivano dal pannello Testo dell'editor (text_style.json).
+type CaptionLook = {
+  font: string; weight: number; case: "sentence" | "upper" | "lower"; size_pct: number; bottom_pct: number;
+  stroke_px: number; stroke_color: string; shadow: "none" | "soft" | "hard"; colors: string[];
+  emphasis: Emphasis | null; animation: "blur_in" | "pop" | "none";
+  italic?: boolean; effect?: "none" | "glow" | "box"; fx_color?: string;
+  x_pct?: number; y_pct?: number; scale?: number; rotation?: number;
+  anim?: { in?: Spec; out?: Spec }; // pannello Effetti
+};
+type Spec = { type: string; ms: number; speed?: number };
 type Look = {
   style: string;
   fonts_url: string | null;
   grade: { css_filter: string; vignette: number };
   pacing: { camera: string; punch_in: { enabled: boolean; scale: number; mode: string; ease_ms: number } };
-  captions: {
-    font: string; weight: number; case: "sentence" | "upper" | "lower"; size_pct: number; bottom_pct: number;
-    stroke_px: number; stroke_color: string; shadow: "none" | "soft" | "hard"; colors: string[];
-    emphasis: Emphasis | null; animation: "blur_in" | "pop" | "none";
-  };
+  captions: CaptionLook;
   hook: {
     duration_ms: number; center_pct: number; size_pct: number; kicker_ratio: number; sub_ratio: number;
     font: string; big_font: string; weight: number; big_weight: number; big_italic: boolean; case: "sentence" | "upper";
@@ -38,7 +47,10 @@ type Look = {
   } | null;
   cards: { kind: "liquid_glass" | "sticker" | "none"; accent: string; surface: string; title_font: string };
 };
-type Caption = { from_ms: number; to_ms: number; words: { text: string; from_ms: number }[]; emphasis: number; color: string };
+type Caption = {
+  from_ms: number; to_ms: number; words: { text: string; from_ms: number }[]; emphasis: number; color: string;
+  style?: Partial<CaptionLook>; // modifiche di questa sola scena
+};
 export type StyledReelProps = {
   fps: number; width: number; height: number; durationInFrames: number;
   look: Look;
@@ -48,9 +60,17 @@ export type StyledReelProps = {
   hook: { lines: { text: string; role: "kicker" | "big" | "sub" }[]; to_ms: number } | null;
   cards: {
     id: string; src: string | null; emoji: string | null; from_ms: number; to_ms: number; title: string;
-    kind: "image" | "emoji" | "text"; placement: "side" | "above" | "pair" | "center" | "top" | "behind";
+    kind: "image" | "emoji" | "text"; placement: "side" | "above" | "pair" | "center" | "top" | "behind" | "free";
     size: "small" | "medium" | "large"; side: "left" | "right";
+    // sticker messi a mano nel pannello Sticker: centro in % del fotogramma, grandezza, rotazione
+    x_pct?: number | null; y_pct?: number | null; scale?: number; rotation?: number;
+    layer?: "under_text" | "over_text" | "person";
+    emoji_imgs?: string[] | null; // emoji stile iPhone (PNG), una per emoji
+    cutout?: boolean; // foto scontornata (pannello Immagini): niente cornice
+    anim?: { in?: Spec; out?: Spec; loop?: Spec }; // pannello Effetti
   }[];
+  // transizioni alle giunte tra pezzi (join = indice del pezzo prima della giunta)
+  transitions?: { join: number; at_ms: number; type: string; ms: number }[];
   lowerThird: { name: string; role: string; from_ms: number; to_ms: number; name_font: string; role_font: string } | null;
   sounds: { src: string; from_ms: number; volume: number }[];
 };
@@ -122,10 +142,56 @@ function punchScale(t: number, p: StyledReelProps): number {
   return (prev + (target - prev) * k) * push;
 }
 
+const TransitionVideo: React.FC<{ p: StyledReelProps }> = ({ p }) => {
+  const { width, height } = useVideoConfig();
+  const fps = p.fps;
+  const byJoin = new Map((p.transitions ?? []).map((x) => [x.join, x]));
+  const D = (j: number) => {
+    const x = byJoin.get(j);
+    return x ? Math.max(2, Math.round(f(x.ms, fps) / 2) * 2) : 0;
+  };
+  const n = p.video.pieces.length;
+  const items: React.ReactNode[] = [];
+  p.video.pieces.forEach((x, i) => {
+    const before = i > 0 ? D(i - 1) / 2 : 0;
+    const after = i < n - 1 ? D(i) / 2 : 0;
+    const len = Math.max(1, f(x.to_ms, fps) - f(x.from_ms, fps));
+    items.push(
+      <TransitionSeries.Sequence key={`s${i}`} durationInFrames={len + before + after}>
+        <OffthreadVideo src={staticFile(p.video.src)} trimBefore={Math.max(0, f(x.src_ms, fps) - before)} muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      </TransitionSeries.Sequence>,
+    );
+    const tr = byJoin.get(i);
+    if (tr && i < n - 1) {
+      items.push(
+        <TransitionSeries.Transition key={`t${i}`} presentation={presentationFor(tr.type, width, height)} timing={linearTiming({ durationInFrames: D(i) })} />,
+      );
+    }
+  });
+  return (
+    <>
+      <TransitionSeries>{items}</TransitionSeries>
+      {/* l'audio resta a taglio netto (niente voce doppia durante la transizione) */}
+      {p.video.pieces.map((x, i) => (
+        <Sequence key={`a${i}`} from={f(x.from_ms, fps)} durationInFrames={Math.max(1, f(x.to_ms, fps) - f(x.from_ms, fps))}>
+          <Audio src={staticFile(p.video.src)} trimBefore={f(x.src_ms, fps)} />
+        </Sequence>
+      ))}
+    </>
+  );
+};
+
 const VideoLayer: React.FC<{ p: StyledReelProps; src?: string; transparent?: boolean }> = ({ p, src, transparent }) => {
   const frame = useCurrentFrame();
   const t = (frame / p.fps) * 1000;
   const scale = punchScale(t, p);
+  if (!transparent && (p.transitions ?? []).length > 0) {
+    return (
+      <AbsoluteFill style={{ transform: `scale(${scale})`, transformOrigin: "50% 38%", filter: p.look.grade.css_filter }}>
+        <TransitionVideo p={p} />
+      </AbsoluteFill>
+    );
+  }
   // la persona ritagliata serve solo mentre c'è una grafica dietro
   if (transparent && !p.cards.some((c) => c.placement === "behind" && t >= c.from_ms - 50 && t <= c.to_ms + 50)) return null;
   return (
@@ -141,28 +207,40 @@ const VideoLayer: React.FC<{ p: StyledReelProps; src?: string; transparent?: boo
 
 const CaptionLayer: React.FC<{ p: StyledReelProps }> = ({ p }) => {
   const frame = useCurrentFrame();
-  const { fps, width } = useVideoConfig();
+  const { fps, width, height } = useVideoConfig();
   const t = (frame / fps) * 1000;
   const c = p.captions.find((x) => t >= x.from_ms && t < x.to_ms);
   if (!c) return null;
-  const cap = p.look.captions;
+  const cap: CaptionLook = { ...p.look.captions, ...(c.style ?? {}) };
   const size = (width * cap.size_pct) / 100;
-  const shadow = cap.shadow === "soft" ? "0 4px 22px rgba(0,0,0,.55), 0 1px 3px rgba(0,0,0,.6)" : cap.shadow === "hard" ? "0 7px 0 rgba(0,0,0,.55)" : "none";
-  const base: React.CSSProperties = { fontFamily: `"${cap.font}", sans-serif`, fontWeight: cap.weight, fontSize: size, lineHeight: 1.08, textShadow: cap.stroke_px > 0 ? "none" : shadow };
+  const fx = cap.fx_color ?? "#000000";
+  const shadow = cap.effect === "glow"
+    ? `0 0 ${size * 0.12}px ${fx}, 0 0 ${size * 0.4}px ${fx}, 0 0 ${size * 0.9}px ${fx}`
+    : cap.shadow === "soft" ? "0 4px 22px rgba(0,0,0,.55), 0 1px 3px rgba(0,0,0,.6)" : cap.shadow === "hard" ? "0 7px 0 rgba(0,0,0,.55)" : "none";
+  const base: React.CSSProperties = {
+    fontFamily: `"${cap.font}", sans-serif`, fontWeight: cap.weight, fontStyle: cap.italic ? "italic" : "normal",
+    fontSize: size, lineHeight: 1.08, textShadow: cap.stroke_px > 0 ? "none" : shadow,
+  };
   const emph = cap.emphasis;
 
-  // entrata: pop dell'intera frase (viral) o parola per parola sfocata (premium)
+  // entrata e uscita (pannello Effetti); senza scelte: pop (viral) o parola per parola (premium)
+  const inSpec: Spec = cap.anim?.in ?? { type: cap.animation === "pop" ? "pop" : cap.animation === "blur_in" ? "words_blur" : "none", ms: 320 };
+  const outSpec = cap.anim?.out;
   const local = frame - f(c.from_ms, fps);
-  const pop = cap.animation === "pop" ? spring({ frame: local, fps, config: { damping: 9, stiffness: 220, mass: 0.6 } }) : 1;
-  const popScale = cap.animation === "pop" ? 0.55 + 0.45 * pop : 1;
+  const springPop = inSpec.type === "pop";
+  const pop = springPop ? spring({ frame: local, fps, config: { damping: 9, stiffness: 220, mass: 0.6 } }) : 1;
+  const popScale = springPop ? 0.55 + 0.45 * pop : 1;
+  const perWord = inSpec.type === "words_blur" || inSpec.type === "words_pop";
+  const st = animState({ inSpec: springPop || perWord ? null : inSpec, outSpec, t: t - c.from_ms, dur: c.to_ms - c.from_ms });
+  const fxCss = animCss(st, emph?.color ?? cap.fx_color ?? "#FFFFFF");
 
   const word = (w: Caption["words"][number], i: number) => {
     const isEmph = emph && i === c.emphasis;
     const appear = frame - f(w.from_ms, fps);
     let style: React.CSSProperties = {};
-    if (cap.animation === "blur_in") {
-      const k = interpolate(appear, [0, 9], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: ease });
-      style = { opacity: k, filter: `blur(${(1 - k) * 14}px)`, transform: `translateY(${(1 - k) * 16}px)` };
+    if (perWord) {
+      const ws = animCss(wordState(inSpec.type, (appear / fps) * 1000, inSpec.ms));
+      style = { opacity: ws.opacity, filter: ws.filter, transform: ws.transform, display: "inline-block" };
     }
     const text = caseText(w.text, cap.case).replace(/[,.]$/, "");
     const emphFamily = emph?.font ?? cap.font;
@@ -178,7 +256,7 @@ const CaptionLayer: React.FC<{ p: StyledReelProps }> = ({ p }) => {
           fontSize: emphSize,
           lineHeight: 1.0,
           letterSpacing: emph!.layout === "line" ? "-0.02em" : undefined,
-          textShadow: cap.stroke_px > 0 ? "none" : `0 0 40px ${emph!.color}40, 0 6px 30px rgba(0,0,0,.5)`,
+          textShadow: cap.stroke_px > 0 ? "none" : cap.effect && cap.effect !== "none" ? shadow : `0 0 40px ${emph!.color}40, 0 6px 30px rgba(0,0,0,.5)`,
         }
       : { ...base, ...style };
     const color = isEmph ? emph!.color : c.color;
@@ -187,11 +265,23 @@ const CaptionLayer: React.FC<{ p: StyledReelProps }> = ({ p }) => {
 
   const lineMode = emph && emph.layout === "line" && c.emphasis >= 0;
   const rest = c.words.map((w, i) => ({ w, i })).filter(({ i }) => !lineMode || i !== c.emphasis);
+  // box: fondo colorato dietro ogni riga (come nell'editor)
+  const box: React.CSSProperties = cap.effect === "box"
+    ? { display: "inline-block", background: fx, padding: `${size * 0.06}px ${size * 0.18}px`, borderRadius: size * 0.22, fontSize: size, lineHeight: 1.15 }
+    : {};
+  // posizione, rotazione e grandezza scelte trascinando il testo nell'editor
+  const dx = ((cap.x_pct ?? 0) / 100) * width;
+  const dy = ((cap.y_pct ?? 0) / 100) * height;
+  const userScale = cap.scale ?? 1;
   return (
     <AbsoluteFill style={{ justifyContent: "flex-end", alignItems: "center" }}>
-      <div style={{ position: "absolute", bottom: `${cap.bottom_pct}%`, left: "12%", right: "12%", textAlign: "center", transform: `scale(${popScale})`, transformOrigin: "50% 70%" }}>
-        {rest.length > 0 && <div>{rest.map(({ w, i }) => word(w, i))}</div>}
-        {lineMode && <div style={{ marginTop: size * 0.05 }}>{word(c.words[c.emphasis], c.emphasis)}</div>}
+      <div style={{
+        position: "absolute", bottom: `${cap.bottom_pct}%`, left: "50%", width: "max-content", maxWidth: "76%", textAlign: "center",
+        transform: `translate(calc(-50% + ${dx}px), ${dy}px) rotate(${cap.rotation ?? 0}deg) scale(${popScale * userScale}) ${fxCss.transform === "none" ? "" : fxCss.transform}`,
+        transformOrigin: "50% 50%", fontSize: size, opacity: fxCss.opacity, filter: fxCss.filter, clipPath: fxCss.clipPath,
+      }}>
+        {rest.length > 0 && <div><span style={box}>{rest.map(({ w, i }) => word(w, i))}</span></div>}
+        {lineMode && <div style={{ marginTop: size * 0.05 }}><span style={box}>{word(c.words[c.emphasis], c.emphasis)}</span></div>}
       </div>
     </AbsoluteFill>
   );
@@ -283,7 +373,11 @@ const SIZE = {
 
 // Pop-up nei punti dei reference: accanto/sopra il sottotitolo, coppia ai lati, grande al
 // centro sotto il testo, in alto, oppure DIETRO la persona (livello "behind").
-const PopupLayer: React.FC<{ p: StyledReelProps; layer: "behind" | "front" }> = ({ p, layer }) => {
+const cardLayer = (c: Card): "behind" | "under" | "over" =>
+  c.layer === "person" || c.placement === "behind" ? "behind" : c.layer === "over_text" ? "over" : "under";
+
+// behind = dietro la persona (con la sagoma), under = dietro ai sottotitoli, over = davanti
+const PopupLayer: React.FC<{ p: StyledReelProps; layer: "behind" | "under" | "over" }> = ({ p, layer }) => {
   const frame = useCurrentFrame();
   const { fps, width: W, height: H } = useVideoConfig();
   const t = (frame / fps) * 1000;
@@ -296,7 +390,7 @@ const PopupLayer: React.FC<{ p: StyledReelProps; layer: "behind" | "front" }> = 
 
   return (
     <>
-      {p.cards.filter((c) => (c.placement === "behind") === (layer === "behind")).map((c: Card) => {
+      {p.cards.filter((c) => cardLayer(c) === layer).map((c: Card) => {
         const a = f(c.from_ms, fps), b = f(c.to_ms, fps);
         if (frame < a || frame > b) return null;
         const local = frame - a;
@@ -305,14 +399,27 @@ const PopupLayer: React.FC<{ p: StyledReelProps; layer: "behind" | "front" }> = 
         const soft = spring({ frame: local, fps, config: { damping: 18, stiffness: 80 } });
         const kind: "image" | "emoji" | "text" = c.src ? "image" : c.kind === "text" && !c.emoji ? "text" : "emoji";
         const w = W * SIZE[kind][c.size];
-        const enter: React.CSSProperties = premium
-          ? { opacity: Math.min(1, soft * 1.3) * out, filter: `blur(${(1 - soft) * 10}px)`, transform: `translateY(${(1 - soft) * 50}px) scale(${0.94 + 0.06 * soft})` }
-          : { opacity: Math.min(1, pop * 2) * out, transform: `scale(${(0.25 + 0.75 * pop) * (0.6 + 0.4 * out)})` };
+        const fxs = c.anim ? animCss(animState({ inSpec: c.anim.in, outSpec: c.anim.out, loopSpec: c.anim.loop, t: ((frame - a) / fps) * 1000, dur: c.to_ms - c.from_ms })) : null;
+        const enter: React.CSSProperties = fxs
+          ? { opacity: fxs.opacity, transform: fxs.transform, filter: fxs.filter, clipPath: fxs.clipPath, fontSize: W * 0.04 }
+          : premium
+            ? { opacity: Math.min(1, soft * 1.3) * out, filter: `blur(${(1 - soft) * 10}px)`, transform: `translateY(${(1 - soft) * 50}px) scale(${0.94 + 0.06 * soft})` }
+            : { opacity: Math.min(1, pop * 2) * out, transform: `scale(${(0.25 + 0.75 * pop) * (0.6 + 0.4 * out)})` };
         const shadow = premium ? "drop-shadow(0 24px 40px rgba(0,0,0,.45))" : "drop-shadow(0 8px 0 rgba(0,0,0,.35))";
 
-        const emojiEl = (e: string, size: number) => (
-          <span style={{ fontFamily: EMOJI_FONT, fontSize: size, lineHeight: 1, display: "inline-block", filter: shadow }}>{e}</span>
-        );
+        // emoji: immagini stile iPhone se ci sono, altrimenti il font emoji
+        const emojiEl = (e: string, size: number, i?: number) => {
+          const imgs = c.emoji_imgs ?? null;
+          if (imgs && imgs.length) {
+            const list = i === undefined ? imgs : [imgs[Math.min(i, imgs.length - 1)]];
+            return (
+              <span style={{ display: "inline-flex", gap: size * 0.04, filter: shadow }}>
+                {list.map((src, k) => <Img key={k} src={staticFile(src)} style={{ width: size, height: size, display: "block" }} />)}
+              </span>
+            );
+          }
+          return <span style={{ fontFamily: EMOJI_FONT, fontSize: size, lineHeight: 1, display: "inline-block", filter: shadow }}>{e}</span>;
+        };
         // etichetta solo sugli elementi da mostrare: mai sulle emoji piccole (come nei reference)
         const label = c.title && kind !== "text" && c.placement !== "behind" && !(kind === "emoji" && c.size === "small") ? (
           premium
@@ -321,7 +428,10 @@ const PopupLayer: React.FC<{ p: StyledReelProps; layer: "behind" | "front" }> = 
         ) : null;
 
         let body: React.ReactNode;
-        if (kind === "image") {
+        if (kind === "image" && c.cutout) {
+          // foto scontornata: solo la figura, con un'ombra morbida che la stacca dal video
+          body = <Img src={staticFile(c.src!)} style={{ width: "100%", display: "block", filter: "drop-shadow(0 18px 30px rgba(0,0,0,.45))" }} />;
+        } else if (kind === "image") {
           const feather = premium && (c.placement === "behind" || c.placement === "top");
           const mask = "radial-gradient(ellipse 72% 70% at 50% 50%, #000 55%, transparent 100%)";
           const img = (
@@ -336,6 +446,16 @@ const PopupLayer: React.FC<{ p: StyledReelProps; layer: "behind" | "front" }> = 
             : premium
               ? <div style={{ filter: shadow }}>{img}{label}</div>
               : <div style={{ textAlign: "center" }}><div style={{ background: "#fff", padding: W * 0.012, borderRadius: 24, filter: shadow }}>{img}</div>{label}</div>;
+        } else if (kind === "text" && !premium) {
+          // viral: etichetta gialla col bordo nero (come nel pannello Sticker dell'editor)
+          body = (
+            <div style={{
+              display: "inline-block", background: "#FFD60A", color: "#000", border: `${W * 0.0055}px solid #000`,
+              borderRadius: W * 0.016, padding: `${W * 0.006}px ${W * 0.025}px`, rotate: "-4deg", whiteSpace: "nowrap",
+              fontFamily: `"${cap.font}", sans-serif`, fontWeight: 800, lineHeight: 1.05,
+              fontSize: W * ({ small: 0.05, medium: 0.07, large: 0.11 } as const)[c.size], filter: shadow,
+            }}>{c.title}</div>
+          );
         } else if (kind === "text") {
           // numero/parola enorme (es. «60s» dietro la persona), riempimento a righe come il reference
           body = (
@@ -353,17 +473,29 @@ const PopupLayer: React.FC<{ p: StyledReelProps; layer: "behind" | "front" }> = 
         const box = (style: React.CSSProperties, extra: React.CSSProperties = {}) => (
           <div key={c.id} style={{ position: "absolute", ...style, ...enter, ...extra, transformOrigin: "50% 60%" }}>{body}</div>
         );
+        if (c.placement === "free") {
+          // centro nel punto scelto, poi grandezza e rotazione dell'utente (sopra l'animazione)
+          return (
+            <div key={c.id} style={{
+              position: "absolute", left: ((c.x_pct ?? 50) / 100) * W, top: ((c.y_pct ?? 40) / 100) * H,
+              width: kind === "image" ? w : undefined, translate: "-50% -50%",
+              rotate: `${c.rotation ?? 0}deg`, scale: String(c.scale ?? 1),
+            }}>
+              <div style={{ ...enter, transformOrigin: "50% 50%", textAlign: "center" }}>{body}</div>
+            </div>
+          );
+        }
         switch (c.placement) {
           case "pair": {
             const [l, r] = graphemes(c.emoji ?? "");
             const s = W * SIZE.emoji[c.size];
-            const one = (e: string, cx: number, rot: number, k: string) => (
-              <div key={k} style={{ position: "absolute", left: cx - s / 2, top: capLineY - s * 0.55, ...enter, rotate: `${rot}deg` }}>{emojiEl(e, s)}</div>
+            const one = (e: string, cx: number, rot: number, k: string, i: number) => (
+              <div key={k} style={{ position: "absolute", left: cx - s / 2, top: capLineY - s * 0.55, ...enter, rotate: `${rot}deg` }}>{emojiEl(e, s, i)}</div>
             );
             return (
               <React.Fragment key={c.id}>
-                {one(l ?? "✨", W * 0.17, -8, "l")}
-                {one(r ?? l ?? "✨", W * 0.83, 8, "r")}
+                {one(l ?? "✨", W * 0.17, -8, "l", 0)}
+                {one(r ?? l ?? "✨", W * 0.83, 8, "r", r ? 1 : 0)}
               </React.Fragment>
             );
           }
@@ -401,7 +533,7 @@ const BehindMask: React.FC<{ p: StyledReelProps; children: React.ReactNode }> = 
   const { fps, width: W, height: H } = useVideoConfig();
   const m = p.video.masks;
   const t = (frame / fps) * 1000;
-  if (!p.cards.some((c) => c.placement === "behind" && t >= c.from_ms - 50 && t <= c.to_ms + 50)) return null;
+  if (!p.cards.some((c) => cardLayer(c) === "behind" && t >= c.from_ms - 50 && t <= c.to_ms + 50)) return null;
   if (!m) return <AbsoluteFill>{children}</AbsoluteFill>;
   const piece = p.video.pieces.find((x) => t >= x.from_ms && t < x.to_ms) ?? p.video.pieces[p.video.pieces.length - 1];
   const idx = Math.max(1, Math.min(m.count, Math.round(((piece.src_ms + t - piece.from_ms) / 1000) * fps) + 1));
@@ -440,7 +572,8 @@ const LowerThird: React.FC<{ p: StyledReelProps }> = ({ p }) => {
 };
 
 export const StyledReel: React.FC<StyledReelProps> = (p) => {
-  const fams = ["Noto Color Emoji", p.look.captions.font, p.look.captions.emphasis?.font, p.look.hook?.font, p.look.hook?.big_font, p.look.cards.title_font, p.lowerThird?.name_font]
+  const sceneFonts = p.captions.flatMap((c) => [c.style?.font, c.style?.emphasis?.font]);
+  const fams = ["Noto Color Emoji", p.look.captions.font, p.look.captions.emphasis?.font, ...sceneFonts, p.look.hook?.font, p.look.hook?.big_font, p.look.cards.title_font, p.lowerThird?.name_font]
     .filter((x): x is string => Boolean(x));
   const ready = useFonts(p.look.fonts_url, fams);
   const { fps } = useVideoConfig();
@@ -454,9 +587,10 @@ export const StyledReel: React.FC<StyledReelProps> = (p) => {
       {p.look.style === "premium" && <AbsoluteFill style={{ background: "linear-gradient(to top, rgba(0,0,0,.42), transparent 42%)" }} />}
       {ready && (
         <>
-          <PopupLayer p={p} layer="front" />
+          <PopupLayer p={p} layer="under" />
           <LowerThird p={p} />
           <CaptionLayer p={p} />
+          <PopupLayer p={p} layer="over" />
           <HookLayer p={p} />
         </>
       )}

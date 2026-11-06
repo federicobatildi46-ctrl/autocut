@@ -1,6 +1,8 @@
 // autocut editor — interfaccia locale (nessuna build: ES modules nel browser).
 // Tutti i tempi interni sono ms sull'asse della camera (come in timeline.json).
 
+import { animCss, animState, wordState } from "/anim.js";
+
 const $ = (sel, el = document) => el.querySelector(sel);
 const video = $("#video");
 const PAD = 12; // px a sinistra dello 0 nella timeline
@@ -42,6 +44,38 @@ const S = {
   lastChunk: -1,
   lastWord: -1,
   dragging: false,
+  // pannello Testo
+  txScope: "all", // all = tutti i sottotitoli | scene = solo la frase corrente
+  txSlot: "main", // main = font principale | emph = font della parola chiave
+  txChunk: -1, // ultima frase mostrata (anche in pausa tra due frasi)
+  txSel: false, // testo selezionato nell'anteprima (riquadro con le maniglie)
+  txDrag: null,
+  txLive: null, // posizione/rotazione/grandezza mentre trascini, prima di salvare
+  txPanel: false, // pannello laterale aperto nello schermo intero
+  viewerTab: "text", // text | stickers
+  popSel: null, // sticker selezionato nell'anteprima
+  stTab: "add", // pannello Sticker: add | edit | list (le schede non spostano la libreria)
+  emoMap: new Map(), // emoji -> PNG stile iPhone (library/emoji)
+  fxTab: "text", // pannello Effetti: text | stickers | trans
+  imgQ: "", // pannello Immagini: richiesta, risultati, opzioni, lavori in corso
+  imgRes: null,
+  imgShown: "",
+  imgBusy: false,
+  imgErr: "",
+  imgCut: true,
+  imgQuality: "fast",
+  imgTransp: false,
+  imgFree: false,
+  imgJobs: {},
+  imgRedo: false,
+  fxPoint: null, // giunta selezionata
+  fxBusy: false,
+  fxAll: false,
+  fxAuto: {}, // stili per cui Claude ha già proposto in questa sessione
+  transTf: "",
+  emoCats: [],
+  emoCat: 0,
+  popLive: null, // sticker mentre lo trascini
 };
 
 // --- util --------------------------------------------------------------------
@@ -88,9 +122,11 @@ async function mutate(path, body, okMsg) {
   st.textContent = "Salvo…";
   st.classList.add("busy");
   try {
-    apply(await api(path, body));
+    const data = await api(path, body);
+    apply(data);
     st.textContent = "Salvato";
     if (okMsg) toast(okMsg);
+    return data;
   } catch (e) {
     st.textContent = "Errore";
     toast(e.message, true);
@@ -167,9 +203,151 @@ function tick() {
   updateClock(cur);
   updateCaption(cur);
   updateLowerThird(cur);
+  updateTransitionFx(cur);
   updateLook(cur);
   updatePopups(cur);
+  updateCaptionFx(cur);
+  updatePopupFx(cur);
+  if (S.viewer) updateViewer(cur);
+  updateCapSel();
   requestAnimationFrame(tick);
+}
+
+// --- visualizzatore a schermo intero -------------------------------------------
+// Sposta il fotogramma (video + sottotitoli + hook + pop-up) in un livello che copre
+// tutto lo schermo: verticale = telefono, orizzontale = 16:9. Stessa riproduzione.
+
+// Inverso di editedAt: dal tempo del montato al tempo sull'asse camera.
+function axisAtEdited(t) {
+  let acc = 0;
+  for (const r of S.eff) {
+    if (r.state !== "keep") continue;
+    const len = r.end_ms - r.start_ms;
+    if (t <= acc + len) return r.start_ms + Math.max(0, t - acc);
+    acc += len;
+  }
+  return S.axisEnd;
+}
+
+function openViewer() {
+  if (S.viewer || !S.tl) return;
+  S.viewer = true;
+  const v = $("#viewer");
+  v.hidden = false;
+  v.classList.toggle("portrait", S.portrait);
+  v.classList.toggle("landscape", !S.portrait);
+  $("#viewer-stage").appendChild($("#frame"));
+  S.vCutsKey = null;
+  fitFrame();
+  // schermo intero vero del browser; se non è permesso il livello copre comunque la finestra
+  v.requestFullscreen?.().catch(() => {});
+}
+
+function closeViewer() {
+  if (!S.viewer) return;
+  S.viewer = false;
+  S.vScrub = null;
+  $("#stage").appendChild($("#frame"));
+  $("#viewer").hidden = true;
+  toggleViewerPanel(false);
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  fitFrame();
+}
+
+function viewerSpan() {
+  return S.mode === "edited" ? keptTotal() : S.axisEnd - S.axisStart;
+}
+
+function viewerPos(cur) {
+  return S.mode === "edited" ? editedAt(cur) : cur - S.axisStart;
+}
+
+// In Raw le parti tolte si vedono in rosso sulla barra; nel montato non esistono.
+function renderViewerCuts() {
+  const box = $("#v-cuts");
+  S.vCutsKey = { eff: S.eff, mode: S.mode };
+  if (S.mode === "edited") { box.innerHTML = ""; return; }
+  const span = S.axisEnd - S.axisStart || 1;
+  box.innerHTML = S.eff
+    .filter((r) => r.state === "remove")
+    .map((r) => `<i style="left:${((r.start_ms - S.axisStart) / span) * 100}%;width:${((r.end_ms - r.start_ms) / span) * 100}%"></i>`)
+    .join("");
+}
+
+function updateViewer(cur) {
+  if (!S.vCutsKey || S.vCutsKey.eff !== S.eff || S.vCutsKey.mode !== S.mode) renderViewerCuts();
+  const span = viewerSpan();
+  const pos = Math.min(span, Math.max(0, viewerPos(cur)));
+  const pct = `${(span ? pos / span : 0) * 100}%`;
+  $("#v-fill").style.width = pct;
+  $("#v-knob").style.left = pct;
+  $("#v-now").textContent = clock(pos);
+  $("#v-total").textContent = clock(span);
+  const mode = $("#v-mode");
+  const label = S.mode === "edited" ? "Montato" : "Raw";
+  if (mode.textContent !== label) mode.textContent = label;
+  $("#v-cc").classList.toggle("on", !$("#caption").classList.contains("off"));
+}
+
+function seekFraction(ev) {
+  const r = $("#v-seek").getBoundingClientRect();
+  return Math.min(1, Math.max(0, (ev.clientX - r.left) / Math.max(1, r.width)));
+}
+
+function seekViewerTo(f) {
+  const t = f * viewerSpan();
+  seekMs(S.mode === "edited" ? axisAtEdited(t) : S.axisStart + t);
+}
+
+function wireViewer() {
+  const seek = $("#v-seek");
+  seek.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    seek.setPointerCapture(e.pointerId);
+    S.vScrub = { wasPlaying: !video.paused };
+    S.stopAt = null;
+    video.pause();
+    seek.classList.add("scrubbing");
+    seekViewerTo(seekFraction(e));
+  });
+  seek.addEventListener("pointermove", (e) => {
+    const f = seekFraction(e);
+    const tip = $("#v-tip");
+    tip.textContent = clock(f * viewerSpan());
+    tip.style.left = `${f * 100}%`;
+    if (S.vScrub) seekViewerTo(f);
+  });
+  const endScrub = () => {
+    if (!S.vScrub) return;
+    const resume = S.vScrub.wasPlaying;
+    S.vScrub = null;
+    seek.classList.remove("scrubbing");
+    if (resume) video.play();
+  };
+  seek.addEventListener("pointerup", endScrub);
+  seek.addEventListener("pointercancel", endScrub);
+
+  $("#v-play").addEventListener("click", togglePlay);
+  $("#v-close").addEventListener("click", closeViewer);
+  $("#v-mode").addEventListener("click", () => setMode(S.mode === "edited" ? "raw" : "edited"));
+  $("#v-cc").addEventListener("click", () => $("#btn-cc").click());
+  // clic sul video = play/pausa, come sul telefono
+  $("#viewer-stage").addEventListener("click", (e) => {
+    if (e.target.closest(".viewer-bar, #caption, .cap-sel, .pop-el") || S.txClickGuard) return;
+    togglePlay();
+  });
+  const side = (tab) => toggleViewerPanel(!(S.txPanel && S.viewerTab === tab), tab);
+  $("#v-text").addEventListener("click", () => side("text"));
+  $("#v-sticker").addEventListener("click", () => side("stickers"));
+  $("#v-effects").addEventListener("click", () => side("effects"));
+  $("#v-images").addEventListener("click", () => side("images"));
+  video.addEventListener("play", () => $("#v-play").classList.add("playing"));
+  video.addEventListener("pause", () => $("#v-play").classList.remove("playing"));
+  // Esc in schermo intero lo chiude il browser: chiudiamo anche il livello
+  document.addEventListener("fullscreenchange", () => {
+    if (!document.fullscreenElement && S.viewer) closeViewer();
+    else if (S.viewer) fitFrame();
+  });
 }
 
 // --- brand pack ----------------------------------------------------------------
@@ -204,13 +382,13 @@ function styleFor(brand) {
   return S.portrait ? brand.captions.vertical : brand.captions.horizontal;
 }
 
-function captionHTML(chunk) {
+function captionHTML(chunk, caps = S.look?.captions, text = chunk.text) {
   const style = styleFor(S.brand);
-  if ((!style && !S.look) || chunk.event) return esc(chunk.text);
-  const words = chunk.text.split(/\s+/);
+  if ((!style && !caps) || chunk.event) return esc(text);
+  const words = text.split(/\s+/).filter(Boolean);
   let idx, block;
-  if (S.look) {
-    const e = S.look.captions.emphasis;
+  if (caps) {
+    const e = caps.emphasis;
     idx = e ? emphasisIndex(words) : -1;
     block = Boolean(e && e.layout === "line");
   } else {
@@ -218,8 +396,8 @@ function captionHTML(chunk) {
     block = style.emphasis && style.emphasis.scale >= 1.4;
   }
   return words.map((w, i) => i === idx
-    ? `<span class="emph${block ? " block" : ""}">${esc(w)}</span>`
-    : esc(w)).join(" ");
+    ? `<span class="emph cw${block ? " block" : ""}">${esc(w)}</span>`
+    : `<span class="cw">${esc(w)}</span>`).join(" ");
 }
 
 function fontStack(brand, key, fallback) {
@@ -391,7 +569,7 @@ function updateLook(cur) {
     }
     scale = i % 2 === 1 ? pi.scale : 1;
   }
-  const tf = scale === 1 ? "" : `scale(${scale})`;
+  const tf = `${scale === 1 ? "" : `scale(${scale}) `}${S.transTf}`.trim();
   if (video.style.transform !== tf) video.style.transform = tf;
   const hook = $("#hook");
   const t = S.mode === "edited" ? editedAt(cur) : cur - S.axisStart;
@@ -440,17 +618,11 @@ function updateCaption(cur) {
     if (cur >= c.start && cur < c.end + 250) { idx = i; break; }
     if (c.start > cur) break;
   }
-  if (idx !== S.lastChunk) {
+  if (idx !== S.lastChunk || S.repaint) {
+    const changed = idx !== S.lastChunk;
+    S.repaint = false;
     S.lastChunk = idx;
-    const capEl = $("#caption");
-    capEl.innerHTML = idx >= 0 ? captionHTML(S.chunks[idx]) : "";
-    if (S.look) {
-      const colors = S.look.captions.colors;
-      capEl.style.color = idx >= 0 ? colors[idx % colors.length] : "";
-      const anim = S.look.captions.animation;
-      capEl.classList.remove("anim-pop", "anim-blur_in");
-      if (idx >= 0 && anim !== "none") { void capEl.offsetWidth; capEl.classList.add(`anim-${anim}`); }
-    } else capEl.style.color = "";
+    paintCaption(idx, changed);
     document.querySelectorAll(".chunk.now").forEach((n) => n.classList.remove("now"));
     if (idx >= 0) document.querySelector(`.chunk[data-i="${idx}"]`)?.classList.add("now");
   }
@@ -482,9 +654,10 @@ function buildChunks(words, limits) {
     const full = cur && (cur.n >= limits.words || cur.text.length + 1 + w.text.length > limits.chars);
     const punct = cur && /[.?!,]$/.test(cur.last) && cur.n >= 2;
     if (!cur || gapBreak || full || punct || w.kind === "audio_event" || cur.event) {
-      cur = { start: w.start_ms, end: w.end_ms, text: w.text, n: 1, last: w.text, event: w.kind === "audio_event" };
+      cur = { id: w.id, start: w.start_ms, end: w.end_ms, text: w.text, n: 1, last: w.text, event: w.kind === "audio_event", ws: [w.start_ms] };
       out.push(cur);
     } else {
+      cur.ws.push(w.start_ms);
       cur.end = w.end_ms;
       cur.text += " " + w.text;
       cur.n += 1;
@@ -524,6 +697,8 @@ function apply(data) {
   } else S.brand = data.brand;
   renderBrandSelect();
   renderStyleSelect();
+  loadTextFonts(data.text?.fonts_url);
+  S.repaint = true; // ridisegna la frase con le scelte del pannello Testo (senza animazione)
   $("#project-title").textContent = data.project;
   $("#player-name").textContent = S.tl.sources.camera.file_name;
   $("#btn-undo-top").disabled = !data.summary.can_undo;
@@ -690,6 +865,7 @@ function renderRanges() {
     return `<div class="rng remove${extra}${sel}" data-r="${i}" data-dec="${dec ?? ""}" style="left:${left}px;width:${width}px" title="Parte tolta: ${secs(dur)}">${lbl}</div>`;
   });
   $("#ranges").innerHTML = parts.join("");
+  renderTransitionMarks();
 }
 
 function updatePlayhead(cur) {
@@ -993,6 +1169,35 @@ async function popupAi(path, body, busyText) {
 }
 
 // Pop-up nell'anteprima: compaiono sopra il video come nel render (vetro o sticker).
+// Emoji come immagini stile iPhone (se la libreria c'è), altrimenti come testo.
+const SEG = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const emoKey = (s) => s.replace(/\ufe0f/g, "");
+function emojiParts(text) {
+  return [...SEG.segment(String(text ?? ""))].map((g) => g.segment).filter((g) => g.trim());
+}
+function emojiHTML(text, cls = "emo") {
+  return emojiParts(text).map((g) => {
+    const img = S.emoMap.get(emoKey(g));
+    return img ? `<img class="${cls}" src="/media/emoji/${img}" alt="${esc(g)}" draggable="false">` : esc(g);
+  }).join("");
+}
+
+function popHTML(p, kind) {
+  const free = p.placement === "free";
+  const layer = p.placement === "behind" ? "person" : p.layer;
+  const style = free ? ` style="left:${p.x_pct}%;top:${p.y_pct}%;rotate:${p.rotation}deg;scale:${p.scale}"`
+    : p.scale !== 1 ? ` style="scale:${p.scale}"` : "";
+  return `
+    <div class="pop-el ${kind === "sticker" ? "sticker" : "glass"} at-${p.placement} sz-${p.size} sd-${p.side} k-${p.image_url ? "image" : p.kind} ly-${layer}${p.cutout ? " cutout" : ""}${p.id === S.justAdded ? " just-added" : ""}"
+      data-id="${esc(p.id)}"${style}${layer === "person" ? ' title="nel render passa dietro di te"' : ""}>
+      ${p.image_url ? `<img src="${esc(p.image_url)}" alt="" draggable="false">`
+        : p.emoji ? (p.placement === "pair"
+          ? emojiParts(p.emoji).map((g, i) => `<div class="em pair-${i}">${emojiHTML(g)}</div>`).join("")
+          : `<div class="em">${emojiHTML(p.emoji)}</div>`) : ""}
+      ${p.title && p.placement !== "pair" ? `<div class="t">${esc(p.title)}</div>` : ""}
+    </div>`;
+}
+
 function updatePopups(cur) {
   const layer = $("#popup-layer");
   const items = (S.data?.popups ?? []).filter((p) => p.status !== "rejected"
@@ -1001,16 +1206,9 @@ function updatePopups(cur) {
   if (layer.dataset.key === key) return;
   layer.dataset.key = key;
   const kind = S.look?.cards.kind ?? "liquid_glass";
-  layer.innerHTML = items.map((p) => `
-    <div class="pop-el ${kind === "sticker" ? "sticker" : "glass"} at-${p.placement} sz-${p.size} sd-${p.side} k-${p.image_url ? "image" : p.kind}"
-      ${p.placement === "behind" ? 'title="nel render passa dietro di te"' : ""}>
-      ${p.image_url ? `<img src="${esc(p.image_url)}" alt="">`
-        : p.emoji ? (p.placement === "pair"
-          ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(p.emoji)].map((g) => g.segment).filter((g) => g.trim())
-              .map((g, i) => `<div class="em pair-${i}">${esc(g)}</div>`).join("")
-          : `<div class="em">${esc(p.emoji)}</div>`) : ""}
-      ${p.title && p.placement !== "pair" ? `<div class="t">${esc(p.title)}</div>` : ""}
-    </div>`).join("");
+  layer.innerHTML = items.filter((p) => p.layer !== "over_text").map((p) => popHTML(p, kind)).join("");
+  $("#popup-over").innerHTML = items.filter((p) => p.layer === "over_text").map((p) => popHTML(p, kind)).join("");
+  if (S.popLive) paintPopLive();
 }
 
 const IDEAS = [
@@ -1176,6 +1374,7 @@ const TOOL_TABS = [
   ["audio", "Audio", `<svg viewBox="0 0 24 24"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>`],
   ["text", "Testo", `<svg viewBox="0 0 24 24"><path d="M4 7V5h16v2M12 5v14M9 19h6"/></svg>`],
   ["stickers", "Sticker", `<svg viewBox="0 0 24 24"><path d="M15 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h7l8-8V6a3 3 0 0 0-3-3h-3z"/><path d="M13 21v-5a3 3 0 0 1 3-3h5"/></svg>`],
+  ["images", "Immagini", `<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg>`],
   ["effects", "Effetti", `<svg viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg>`],
   ["transitions", "Transizioni", `<svg viewBox="0 0 24 24"><path d="M4 4h7v16H4zM13 4l7 8-7 8"/></svg>`],
   ["subs", "Sottotitoli", `<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 13h4M13 13h4M7 16h10"/></svg>`],
@@ -1193,6 +1392,7 @@ function renderLeft() {
   if (S.leftTab === "media") box.innerHTML = renderMedia();
   else if (S.leftTab === "brand") box.innerHTML = renderBrandPanel();
   else if (S.leftTab === "subs") box.innerHTML = renderTranscript();
+  else if (["text", "stickers", "images", "effects"].includes(S.leftTab)) renderTextPanels();
   else {
     const label = TOOL_TABS.find((t) => t[0] === S.leftTab)?.[1] ?? "";
     box.innerHTML = `<div class="placeholder">${TOOL_TABS.find((t) => t[0] === S.leftTab)?.[2] ?? ""}
@@ -1295,11 +1495,12 @@ function setMode(mode) {
 }
 
 function fitFrame() {
-  const stage = $("#stage");
+  const stage = S.viewer ? $("#viewer-stage") : $("#stage");
   const v = S.tl?.sources.camera.video;
   if (!v) return;
   const ar = v.display_width / v.display_height;
-  const W = stage.clientWidth - 24, H = stage.clientHeight - 24;
+  const pad = S.viewer ? 48 : 24; // nel visualizzatore c'è la cornice del telefono
+  const W = stage.clientWidth - pad, H = stage.clientHeight - pad;
   let w = W, h = W / ar;
   if (h > H) { h = H; w = H * ar; }
   const frame = $("#frame");
@@ -1314,7 +1515,6 @@ function fitFrame() {
   // valori dei preset pensati su 1080 px di larghezza (o altezza in orizzontale)
   const unit = (S.portrait ? w : h) / 1080;
   if (S.look) {
-    frame.style.setProperty("--cap-stroke", `${(S.look.captions.stroke_px * unit * 2).toFixed(1)}px`);
     if (S.look.hook) {
       frame.style.setProperty("--hook-size", `${((S.portrait ? w : h) * S.look.hook.size_pct / 100).toFixed(1)}px`);
       frame.style.setProperty("--hook-stroke", `${(S.look.hook.stroke_px * unit * 2).toFixed(1)}px`);
@@ -1322,6 +1522,7 @@ function fitFrame() {
     }
   }
   frame.style.setProperty("--lt-size", `${(S.portrait ? w * 0.034 : h * 0.03).toFixed(1)}px`);
+  S.repaint = true; // il bordo del testo dipende dalla grandezza del fotogramma
 }
 
 function jumpCut(dir) {
@@ -1356,7 +1557,22 @@ function wireEvents() {
     e.currentTarget.classList.toggle("on");
     $("#safe-zone").classList.toggle("on");
   });
-  $("#btn-full").addEventListener("click", () => $("#frame").requestFullscreen?.());
+  $("#btn-full").addEventListener("click", openViewer);
+  $("#stage").addEventListener("dblclick", (e) => { if (!e.target.closest("#caption, .cap-sel, .pop-el")) openViewer(); });
+  wireTextPanel($("#left-content"));
+  wireTextPanel($("#viewer-panel"));
+  wireStickerPanel($("#left-content"));
+  wireStickerPanel($("#viewer-panel"));
+  wireEffectsPanel($("#left-content"));
+  wireEffectsPanel($("#viewer-panel"));
+  wireImagesPanel($("#left-content"));
+  wireImagesPanel($("#viewer-panel"));
+  $("#tl-content").addEventListener("mousedown", (e) => {
+    const m = e.target.closest("[data-fx-point]");
+    if (m) { e.stopPropagation(); selectPoint(m.dataset.fxPoint); }
+  }, true);
+  wireCaptionDrag();
+  wireViewer();
   $("#mode-toggle").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-mode]");
     if (b) setMode(b.dataset.mode);
@@ -1546,7 +1762,12 @@ async function sendAi(prompt, kind, timeMs) {
 }
 
 function onKey(e) {
-  if (e.target.closest("input, textarea")) return;
+  if (e.target.closest("input, textarea, select")) return;
+  if (e.key === "Escape" && (S.txSel || S.popSel)) { e.preventDefault(); S.txSel = false; S.popSel = null; renderTextPanels(); return; }
+  if (S.popSel && (e.key === "Delete" || e.key === "Backspace")) { e.preventDefault(); deletePop(S.popSel); return; }
+  if (e.key === "Escape" && S.viewer) { e.preventDefault(); closeViewer(); return; }
+  if (e.key.toLowerCase() === "f" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); S.viewer ? closeViewer() : openViewer(); return; }
+  if (S.viewer && (e.key === "Delete" || e.key === "Backspace" || e.ctrlKey || e.metaKey)) return; // nel visualizzatore si guarda e basta
   if (e.code === "Space") { e.preventDefault(); togglePlay(); }
   else if (e.key === "ArrowRight") { e.preventDefault(); video.pause(); seekMs(nowMs() + (e.shiftKey ? 1000 : FPS_STEP)); }
   else if (e.key === "ArrowLeft") { e.preventDefault(); video.pause(); seekMs(nowMs() - (e.shiftKey ? 1000 : FPS_STEP)); }
@@ -1557,6 +1778,1285 @@ function onKey(e) {
   else if (e.key === "-") zoomTo(S.pps / 1.5);
 }
 
+// --- testo personalizzato (pannello Testo) ---------------------------------------
+// Le scelte stanno in text_style.json (per stile). Il server manda il look già con le
+// scelte "per tutti"; per ogni frase manda in text.resolved i campi che la scena cambia.
+
+const CASE_CSS = { sentence: "none", upper: "uppercase", lower: "lowercase" };
+const TX_COLORS = ["#FFFFFF", "#000000", "#FFD60A", "#FFB800", "#FF7A00", "#FF3B30", "#FF2D78", "#FF66C4",
+  "#B517FF", "#7B61FF", "#2F6BFF", "#00C2FF", "#1FD3CF", "#00E676", "#A3FF12", "#C9A86A"];
+const TX_PRESETS = [
+  ["stroke", "Contorno"], ["shadow", "Ombra"], ["hard", "Ombra netta"],
+  ["glow", "Neon"], ["box", "Box"], ["plain", "Pulito"],
+];
+
+function chunkCaps(chunk) {
+  if (!S.look) return null;
+  const res = chunk ? S.data?.text?.resolved?.[chunk.id] : null;
+  return res ? { ...S.look.captions, ...res } : S.look.captions;
+}
+
+function chunkText(chunk) {
+  return S.data?.text?.scenes?.[chunk.id]?.text ?? chunk.text;
+}
+
+function presetOf(c) {
+  if (c.effect === "glow" || c.effect === "box") return c.effect;
+  if (c.stroke_px > 0) return "stroke";
+  return { soft: "shadow", hard: "hard", none: "plain" }[c.shadow] ?? "plain";
+}
+
+function loadTextFonts(url) {
+  let link = $("#text-fonts");
+  if (!url) { link?.remove(); return; }
+  if (!link) {
+    link = document.createElement("link");
+    link.id = "text-fonts";
+    link.rel = "stylesheet";
+    document.head.appendChild(link);
+  }
+  if (link.getAttribute("href") !== url) link.href = url;
+}
+
+// Valori di posizione della frase mostrata (o quelli dal vivo mentre trascini).
+function capValues() {
+  if (S.txLive) return S.txLive;
+  const c = chunkCaps(S.chunks[S.lastChunk] ?? S.chunks[S.txChunk]) ?? {};
+  return { x_pct: c.x_pct ?? 0, y_pct: c.y_pct ?? 0, scale: c.scale ?? 1, rotation: c.rotation ?? 0 };
+}
+
+function paintTransform() {
+  const capEl = $("#caption");
+  if (!S.look) { capEl.style.translate = capEl.style.rotate = capEl.style.scale = ""; return; }
+  const v = capValues();
+  // cqw/cqh = % del fotogramma (container): resta giusto a qualsiasi grandezza del lettore
+  capEl.style.translate = `calc(-50% + ${v.x_pct.toFixed(2)}cqw) ${v.y_pct.toFixed(2)}cqh`;
+  capEl.style.rotate = `${v.rotation}deg`;
+  capEl.style.scale = String(v.scale);
+}
+
+function paintCaption(idx, animate = false) {
+  const capEl = $("#caption");
+  const chunk = idx >= 0 ? S.chunks[idx] : null;
+  if (!S.look) {
+    capEl.innerHTML = chunk ? captionHTML(chunk) : "";
+    capEl.style.color = "";
+    return;
+  }
+  const c = chunkCaps(chunk);
+  capEl.innerHTML = chunk ? `<span class="cap-in">${captionHTML(chunk, c, chunkText(chunk))}</span>` : "";
+  const st = capEl.style;
+  const frame = $("#frame");
+  const unit = (S.portrait ? frame.clientWidth : frame.clientHeight) / 1080;
+  st.fontFamily = `"${c.font}", system-ui, sans-serif`;
+  st.fontWeight = String(c.weight);
+  st.fontStyle = c.italic ? "italic" : "normal";
+  st.textTransform = CASE_CSS[c.case] ?? "none";
+  st.color = chunk ? c.colors[idx % c.colors.length] : "";
+  st.setProperty("--cap-stroke", `${(c.stroke_px * unit * 2).toFixed(1)}px`);
+  st.setProperty("--cap-stroke-color", c.stroke_color ?? "#000");
+  st.setProperty("--fx-color", c.fx_color ?? "#000");
+  const e = c.emphasis;
+  if (e) {
+    st.setProperty("--emph-font", e.font ? `"${e.font}", Georgia, serif` : st.fontFamily);
+    st.setProperty("--emph-style", e.italic ? "italic" : "normal");
+    st.setProperty("--emph-weight", String(e.weight ?? c.weight));
+    st.setProperty("--emph-color", e.color);
+    st.setProperty("--emph-scale", String(e.scale));
+  }
+  const fx = [`sh-${c.shadow}`, `fx-${c.effect ?? "none"}`, c.stroke_px > 0 ? "fx-stroke" : ""];
+  capEl.className = ["caption", ...fx, $("#btn-cc").classList.contains("on") ? "" : "off"].filter(Boolean).join(" ");
+  paintTransform();
+  if (idx >= 0 && idx !== S.txChunk) {
+    S.txChunk = idx;
+    renderTextPanels();
+  }
+}
+
+// --- pannello ---------------------------------------------------------------------
+
+function textPanelHTML() {
+  if (!S.look) {
+    const btns = (S.data?.styles ?? []).map((s) =>
+      `<button class="btn" data-tx-style="${esc(s.id)}">${esc(s.name)}</button>`).join("");
+    return `<div class="placeholder"><svg viewBox="0 0 24 24"><path d="M4 7V5h16v2M12 5v14M9 19h6"/></svg>
+      <b>Testo</b><br>Scegli prima uno stile: font, colori e stili del testo cambiano con il preset.</div>
+      <div class="btn-row tx-styles">${btns}</div>`;
+  }
+  const T = S.data.text;
+  if (!T) {
+    // pagina nuova con un server avviato prima dell'aggiornamento
+    return `<div class="placeholder"><b>Testo</b><br>L'editor in esecuzione è una versione vecchia.
+      Chiudilo (Ctrl+C nel terminale) e rilancia <code>autocut editor ${esc(S.data.project)}</code>.</div>`;
+  }
+  const chunk = S.chunks[S.txChunk] ?? null;
+  const scene = S.txScope === "scene" && chunk;
+  const c = scene ? chunkCaps(chunk) : S.look.captions;
+  const own = chunk && T.scenes[chunk.id];
+  const slotFont = S.txSlot === "emph" ? c.emphasis?.font ?? c.font : c.font;
+  const pre = presetOf(c);
+  const sw = (field, current) => TX_COLORS.map((h) =>
+    `<button class="sw${current && current.toUpperCase() === h ? " on" : ""}" style="background:${h}" data-tx-color="${field}" data-v="${h}" title="${h}"></button>`).join("")
+    + `<label class="sw pick" title="Altro colore"><input type="color" data-tx-pick="${field}" value="${esc(current ?? "#ffffff")}"></label>`;
+  const fonts = T.fonts.map((f) => `
+    <button class="font-card${f.family === slotFont ? " on" : ""}" data-tx-font="${esc(f.family)}"
+      style="font-family:'${esc(f.family)}';font-weight:${Math.max(...f.weights)}">
+      <span class="fc-name">${esc(f.family)}</span><span class="fc-kind">${esc(f.kind)}</span></button>`).join("");
+  const presets = TX_PRESETS.map(([id, label]) => `
+    <button class="pre-card${pre === id ? " on" : ""}" data-tx-preset="${id}">
+      <span class="pre-demo fx-${id}" style="font-family:'${esc(c.font)}'"><span class="cap-in">Testo</span></span>
+      <span class="pre-label">${label}</span></button>`).join("");
+  const sceneLabel = chunk ? `${clock(S.mode === "edited" ? editedAt(chunk.start) : chunk.start - S.axisStart, false)}` : "—";
+  return `
+    <div class="tx-head">
+      <div class="seg-toggle tx-scope">
+        <button data-tx-scope="all" class="${S.txScope === "all" ? "on" : ""}">Tutti i sottotitoli</button>
+        <button data-tx-scope="scene" class="${S.txScope === "scene" ? "on" : ""}" ${chunk ? "" : "disabled"}>Solo questa scena ${sceneLabel}</button>
+      </div>
+      ${own ? `<div class="tx-own">Questa scena ha modifiche sue <button class="link" data-tx-act="reset-scene">Ripristina scena</button></div>` : ""}
+    </div>
+    <div class="section-title">Testo della scena</div>
+    <textarea id="tx-text" class="tx-text" rows="2" ${chunk ? "" : "disabled"} data-scene="${esc(chunk?.id ?? "")}"
+      placeholder="Porta la testina su una frase">${esc(chunk ? chunkText(chunk) : "")}</textarea>
+    <div class="tx-hint">Invio per salvare · clicca il testo nel video per spostarlo, ruotarlo e ingrandirlo</div>
+
+    <div class="section-title tx-row">Font
+      <div class="seg-toggle small">
+        <button data-tx-slot="main" class="${S.txSlot === "main" ? "on" : ""}">Testo</button>
+        <button data-tx-slot="emph" class="${S.txSlot === "emph" ? "on" : ""}">Parola chiave</button>
+      </div></div>
+    <div class="font-grid">${fonts}</div>
+    <div class="tx-hint">${S.txSlot === "emph" ? "La parola chiave (numeri o la parola più lunga) prende questo font: prova un serif con un testo sans." : `Font del ${esc(S.look.style_name)}. Cambia preset in alto per vedere gli altri.`}</div>
+
+    <div class="section-title">Stile</div>
+    <div class="pre-grid">${presets}</div>
+
+    <div class="section-title">Formato</div>
+    <div class="fmt-row">
+      <button class="fmt${c.weight >= 700 ? " on" : ""}" data-tx-bold="${c.weight >= 700 ? "0" : "1"}" title="Grassetto"><b>B</b></button>
+      <button class="fmt${c.italic ? " on" : ""}" data-tx-italic="${c.italic ? "0" : "1"}" title="Corsivo"><i>I</i></button>
+      <span class="tl-sep"></span>
+      <button class="fmt${c.case === "sentence" ? " on" : ""}" data-tx-case="sentence" title="Come scritto">Aa</button>
+      <button class="fmt${c.case === "upper" ? " on" : ""}" data-tx-case="upper" title="Tutto maiuscolo">AA</button>
+      <button class="fmt${c.case === "lower" ? " on" : ""}" data-tx-case="lower" title="Tutto minuscolo">aa</button>
+    </div>
+
+    <div class="section-title">Colore del testo</div><div class="swatch-row">${sw("color", c.colors[0])}</div>
+    <div class="section-title">Colore della parola chiave</div><div class="swatch-row">${sw("emph_color", c.emphasis?.color)}</div>
+    <div class="section-title">Colore di contorno, box o neon</div><div class="swatch-row">${sw("fx_color", c.fx_color)}</div>
+
+    <div class="section-title">Grandezza <span class="tx-val" id="tx-scale-val">${Math.round(c.scale * 100)}%</span></div>
+    <input type="range" class="tx-range" data-tx-range="scale" min="30" max="300" step="1" value="${Math.round(c.scale * 100)}">
+    <div class="section-title">Rotazione <span class="tx-val" id="tx-rotation-val">${Math.round(c.rotation)}°</span></div>
+    <input type="range" class="tx-range" data-tx-range="rotation" min="-180" max="180" step="1" value="${Math.round(c.rotation)}">
+    <div class="btn-row tx-actions">
+      <button class="btn" data-tx-act="center">Centra</button>
+      <button class="btn" data-tx-act="reset-pos">Posizione originale</button>
+      <button class="btn" data-tx-act="reset-all">Ripristina ${scene ? "scena" : "tutto"}</button>
+    </div>`;
+}
+
+// Ridisegna i pannelli Testo visibili (a sinistra e nello schermo intero).
+function renderTextPanels() {
+  const boxes = [];
+  if (["text", "stickers", "images", "effects"].includes(S.leftTab)) boxes.push([$("#left-content"), S.leftTab]);
+  if (S.viewer && S.txPanel) boxes.push([$("#viewer-panel"), S.viewerTab]);
+  for (const [box, tab] of boxes) {
+    // non interrompere chi sta scrivendo o trascinando un cursore
+    const active = document.activeElement;
+    if (box.contains(active) && ["tx-text", "st-custom", "img-q"].includes(active.id)) continue;
+    if (S.txSliding && box.contains(S.txSliding)) continue;
+    const top = box.scrollTop;
+    box.innerHTML = tab === "stickers" ? stickerPanelHTML() : tab === "effects" ? effectsPanelHTML()
+      : tab === "images" ? imagesPanelHTML() : textPanelHTML();
+    if (tab === "effects") maybeAutoFx();
+    box.scrollTop = top;
+  }
+}
+
+// Pannello a destra nello schermo intero: Testo o Sticker (stesso tasto = chiude).
+function toggleViewerPanel(on = !S.txPanel, tab = S.viewerTab) {
+  S.txPanel = on;
+  S.viewerTab = tab;
+  $("#viewer").classList.toggle("with-panel", on);
+  $("#viewer-panel").hidden = !on;
+  $("#v-text")?.classList.toggle("on", on && tab === "text");
+  $("#v-sticker")?.classList.toggle("on", on && tab === "stickers");
+  $("#v-effects")?.classList.toggle("on", on && tab === "effects");
+  $("#v-images")?.classList.toggle("on", on && tab === "images");
+  if (on) renderTextPanels();
+  if (S.viewer) fitFrame();
+}
+
+function txScene() {
+  return S.txScope === "scene" ? S.chunks[S.txChunk]?.id ?? null : null;
+}
+
+async function saveText(fields, { scene = txScene(), reset = false } = {}) {
+  await mutate("/api/text", { scene, fields, reset });
+}
+
+function wireTextPanel(box) {
+  box.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tx-style],[data-tx-scope],[data-tx-slot],[data-tx-font],[data-tx-preset],[data-tx-bold],[data-tx-italic],[data-tx-case],[data-tx-color],[data-tx-act]");
+    if (!b || b.disabled) return;
+    const d = b.dataset;
+    if (d.txStyle) mutate("/api/style", { id: d.txStyle }, "Stile applicato");
+    else if (d.txScope) { S.txScope = d.txScope; renderTextPanels(); }
+    else if (d.txSlot) { S.txSlot = d.txSlot; renderTextPanels(); }
+    else if (d.txFont) saveText(S.txSlot === "emph" ? { emph_font: d.txFont } : { font: d.txFont });
+    else if (d.txPreset) saveText({ preset: d.txPreset });
+    else if (d.txBold) saveText({ bold: d.txBold === "1" });
+    else if (d.txItalic) saveText({ italic: d.txItalic === "1" });
+    else if (d.txCase) saveText({ case: d.txCase });
+    else if (d.txColor) saveText({ [d.txColor]: d.v });
+    else if (d.txAct === "center") saveText({ x_pct: 0 });
+    else if (d.txAct === "reset-pos") saveText({ x_pct: null, y_pct: null, scale: null, rotation: null });
+    else if (d.txAct === "reset-all") saveText({}, { reset: true });
+    else if (d.txAct === "reset-scene") saveText({}, { scene: S.chunks[S.txChunk]?.id, reset: true });
+  });
+  box.addEventListener("input", (e) => {
+    const r = e.target.closest("[data-tx-range]");
+    if (!r) return;
+    S.txSliding = r;
+    const k = r.dataset.txRange;
+    const v = Number(r.value);
+    S.txLive = { ...capValues(), [k]: k === "scale" ? v / 100 : v };
+    box.querySelector(`#tx-${k}-val`).textContent = k === "scale" ? `${v}%` : `${v}°`;
+    paintTransform();
+  });
+  box.addEventListener("change", async (e) => {
+    const r = e.target.closest("[data-tx-range]");
+    if (r) {
+      const k = r.dataset.txRange;
+      const v = Number(r.value);
+      S.txSliding = null;
+      await saveText({ [k]: k === "scale" ? v / 100 : v });
+      S.txLive = null;
+      return;
+    }
+    const pick = e.target.closest("[data-tx-pick]");
+    if (pick) { saveText({ [pick.dataset.txPick]: pick.value.toUpperCase() }); return; }
+    const ta = e.target.closest("#tx-text");
+    if (ta && ta.dataset.scene) {
+      const chunk = S.chunks.find((x) => x.id === ta.dataset.scene);
+      const value = ta.value.replace(/\s+/g, " ").trim();
+      if (!chunk || value === chunkText(chunk)) return;
+      ta.blur();
+      await saveText({ text: value === chunk.text ? null : value || null }, { scene: chunk.id });
+    }
+  });
+  box.addEventListener("keydown", (e) => {
+    if (e.target.id === "tx-text" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
+  });
+}
+
+// --- testo e sticker nel video: seleziona, sposta, ruota, ingrandisci (come CapCut) ---
+
+function selectCaption() {
+  S.txSel = true;
+  S.popSel = null;
+  if (S.viewer) toggleViewerPanel(true, "text");
+  else if (S.leftTab !== "text") { S.leftTab = "text"; renderLeft(); }
+}
+
+function selectPop(id, { open = true } = {}) {
+  S.popSel = id;
+  S.txSel = false;
+  S.stTab = "edit";
+  if (!open) return;
+  const tab = isPhoto(popItem(id)) && (S.viewer ? S.viewerTab !== "stickers" || !S.txPanel : S.leftTab !== "stickers") ? "images" : "stickers";
+  if (S.viewer) toggleViewerPanel(true, tab);
+  else if (S.leftTab !== tab) { S.leftTab = tab; renderLeft(); }
+  else renderTextPanels();
+}
+
+function capVisible() {
+  const cap = $("#caption");
+  return Boolean(S.look && cap.innerHTML && !cap.classList.contains("off") && !$("#frame").classList.contains("hooking"));
+}
+
+const popEl = (id) => (id ? document.querySelector(`.pop-el[data-id="${CSS.escape(id)}"]`) : null);
+const popItem = (id) => (S.data?.popups ?? []).find((p) => p.id === id) ?? null;
+
+// Centro (in % del fotogramma), grandezza e rotazione di uno sticker com'è adesso.
+function popValues(id) {
+  if (S.popLive?.id === id) return S.popLive;
+  const p = popItem(id);
+  if (p && p.placement === "free") return { id, x_pct: p.x_pct, y_pct: p.y_pct, scale: p.scale, rotation: p.rotation };
+  const el = popEl(id);
+  const fr = $("#frame").getBoundingClientRect();
+  if (!el) return { id, x_pct: 50, y_pct: 40, scale: p?.scale ?? 1, rotation: 0 };
+  const r = el.getBoundingClientRect();
+  return {
+    id,
+    x_pct: ((r.left + r.width / 2 - fr.left) / fr.width) * 100,
+    y_pct: ((r.top + r.height / 2 - fr.top) / fr.height) * 100,
+    scale: p?.scale ?? 1,
+    rotation: 0,
+  };
+}
+
+// Mentre trascini: lo sticker diventa "libero" e segue il mouse (salvato al rilascio).
+function paintPopLive() {
+  const v = S.popLive;
+  const el = v && popEl(v.id);
+  if (!el) return;
+  el.className = el.className.replace(/\bat-\w+/g, "").trim() + " at-free";
+  Object.assign(el.style, { left: `${v.x_pct}%`, top: `${v.y_pct}%`, rotate: `${v.rotation}deg`, scale: String(v.scale) });
+}
+
+function placeSel(sel, cx, cy, w, h, rot) {
+  sel.style.left = `${cx - w / 2}px`;
+  sel.style.top = `${cy - h / 2}px`;
+  sel.style.width = `${w}px`;
+  sel.style.height = `${h}px`;
+  sel.style.rotate = `${rot}deg`;
+}
+
+function updateCapSel() {
+  const sel = $("#cap-sel");
+  const on = S.txSel && capVisible();
+  sel.classList.toggle("on", on);
+  $("#cap-guide").classList.toggle("on", Boolean(S.txDrag?.snapX));
+  if (on) {
+    const cap = $("#caption");
+    const frame = $("#frame");
+    const v = capValues();
+    placeSel(sel, cap.offsetLeft + (v.x_pct / 100) * frame.clientWidth,
+      cap.offsetTop + cap.offsetHeight / 2 + (v.y_pct / 100) * frame.clientHeight,
+      cap.offsetWidth * v.scale, cap.offsetHeight * v.scale, v.rotation);  // prettier-ignore
+  }
+  const psel = $("#pop-sel");
+  const el = popEl(S.popSel);
+  psel.classList.toggle("on", Boolean(el));
+  if (!el) return;
+  const fr = $("#frame").getBoundingClientRect();
+  if (el.classList.contains("at-free")) {
+    const v = popValues(S.popSel);
+    placeSel(psel, (v.x_pct / 100) * fr.width, (v.y_pct / 100) * fr.height,
+      el.offsetWidth * v.scale, el.offsetHeight * v.scale, v.rotation);  // prettier-ignore
+  } else {
+    const r = el.getBoundingClientRect();
+    placeSel(psel, r.left + r.width / 2 - fr.left, r.top + r.height / 2 - fr.top, r.width, r.height, 0);
+  }
+}
+
+function wireCaptionDrag() {
+  const frame = $("#frame");
+  frame.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    const inPop = e.target.closest("#pop-sel") && S.popSel ? S.popSel : null;
+    const inCap = !inPop && e.target.closest("#cap-sel") && S.txSel;
+    const popHit = !inPop && !inCap ? e.target.closest(".pop-el[data-id]")?.dataset.id : null;
+    const capHit = !inPop && !inCap && !popHit && e.target.closest("#caption") && capVisible();
+    const pop = inPop || popHit;
+    const cap = inCap || capHit;
+    if (!pop && !cap) {
+      if (S.txSel || S.popSel) { S.txSel = false; S.popSel = null; renderTextPanels(); }
+      return;
+    }
+    if (cap && !S.look) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (pop) { if (S.popSel !== pop) selectPop(pop); } else selectCaption();
+    const handle = e.target.closest(".cap-sel .h, .cap-sel .rot");
+    const box = $(pop ? "#pop-sel" : "#cap-sel").getBoundingClientRect();
+    const fr = frame.getBoundingClientRect();
+    const r = box.width ? box : (pop ? popEl(pop) : $("#caption")).getBoundingClientRect();
+    S.txDrag = {
+      target: pop ? "pop" : "cap", id: pop,
+      mode: handle ? (handle.classList.contains("rot") ? "rotate" : "scale") : "move",
+      x: e.clientX, y: e.clientY, fw: fr.width, fh: fr.height,
+      cx: r.left + r.width / 2, cy: r.top + r.height / 2,
+      start: pop ? { ...popValues(pop) } : { ...capValues() }, moved: false, snapX: false,
+    };
+    try { frame.setPointerCapture(e.pointerId); } catch { /* puntatore già rilasciato */ }
+  });
+  frame.addEventListener("pointermove", (e) => {
+    const d = S.txDrag;
+    if (!d) return;
+    if (!d.moved && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 3) return;
+    d.moved = true;
+    const v = { ...d.start };
+    if (d.mode === "move") {
+      v.x_pct = d.start.x_pct + ((e.clientX - d.x) / d.fw) * 100;
+      v.y_pct = d.start.y_pct + ((e.clientY - d.y) / d.fh) * 100;
+      const center = d.target === "pop" ? 50 : 0; // sticker: posizione assoluta; testo: spostamento
+      d.snapX = Math.abs(v.x_pct - center) < 1.5; // calamita sul centro
+      if (d.snapX) v.x_pct = center;
+      const [lo, hi, vlo, vhi] = d.target === "pop" ? [0, 100, 0, 100] : [-60, 60, -80, 80];
+      v.x_pct = Math.max(lo, Math.min(hi, v.x_pct));
+      v.y_pct = Math.max(vlo, Math.min(vhi, v.y_pct));
+    } else if (d.mode === "scale") {
+      const k = Math.hypot(e.clientX - d.cx, e.clientY - d.cy) / Math.max(1, Math.hypot(d.x - d.cx, d.y - d.cy));
+      const [lo, hi] = d.target === "pop" ? [0.2, 5] : [0.3, 3];
+      v.scale = Math.max(lo, Math.min(hi, d.start.scale * k));
+    } else {
+      const a0 = Math.atan2(d.y - d.cy, d.x - d.cx), a1 = Math.atan2(e.clientY - d.cy, e.clientX - d.cx);
+      let r = d.start.rotation + ((a1 - a0) * 180) / Math.PI;
+      r = ((r + 540) % 360) - 180;
+      const near = Math.round(r / 90) * 90;
+      if (Math.abs(r - near) < 4) r = near; // calamita su 0°/90°
+      v.rotation = Math.max(-180, Math.min(180, r));
+    }
+    if (d.target === "pop") { S.popLive = v; paintPopLive(); }
+    else { S.txLive = v; paintTransform(); }
+  });
+  const end = async () => {
+    const d = S.txDrag;
+    if (!d) return;
+    S.txDrag = null;
+    if (!d.moved) return;
+    S.txClickGuard = true; // il clic che chiude il trascinamento non è play/pausa
+    setTimeout(() => (S.txClickGuard = false), 0);
+    const round = (x, n) => Math.round(x * n) / n;
+    if (d.target === "pop") {
+      const v = S.popLive;
+      await savePop(d.id, { placement: "free", x_pct: round(v.x_pct, 10), y_pct: round(v.y_pct, 10),
+        scale: round(v.scale, 100), rotation: round(v.rotation, 10) });  // prettier-ignore
+      S.popLive = null;
+      return;
+    }
+    const v = S.txLive;
+    await saveText({ x_pct: round(v.x_pct, 10), y_pct: round(v.y_pct, 10), scale: round(v.scale, 100), rotation: round(v.rotation, 10) });
+    S.txLive = null;
+    paintTransform();
+  };
+  frame.addEventListener("pointerup", end);
+  frame.addEventListener("pointercancel", end);
+}
+
+// --- pannello Sticker --------------------------------------------------------------
+
+const EMO_CAT = {
+  "Smileys & Emotion": ["Faccine", "😀"], "People & Body": ["Persone", "👋"], "Animals & Nature": ["Animali e natura", "🐻"],
+  "Food & Drink": ["Cibo", "🍔"], "Travel & Places": ["Viaggi e luoghi", "🚗"], "Activities": ["Attività", "⚽"],
+  "Objects": ["Oggetti", "💡"], "Symbols": ["Simboli", "❤️"], "Flags": ["Bandiere", "🏁"],
+};
+
+const LAYERS = [
+  ["under_text", "Dietro al testo"],
+  ["over_text", "Davanti al testo"],
+  ["person", "Dietro la persona"],
+];
+const SIZES = [["small", "S"], ["medium", "M"], ["large", "L"]];
+
+// Tempo come nell'orologio del lettore: sul montato o sul raw.
+const showTime = (ms) => clock(S.mode === "edited" ? editedAt(ms) : ms - S.axisStart, false);
+
+async function savePop(id, fields, msg) {
+  await mutate("/api/popups/item", { id, action: "update", fields }, msg);
+}
+
+function popThumb(p) {
+  if (p.image_url) return `<img class="st-thumb" src="${esc(p.image_url)}" alt="">`;
+  if (p.kind === "emoji") return `<span class="st-thumb em">${emojiHTML(p.emoji)}</span>`;
+  return `<span class="st-thumb txt">${esc(p.title)}</span>`;
+}
+
+function stickerEditHTML(sel, title = "Sticker selezionato") {
+  const v = popValues(sel.id);
+  const layer = sel.placement === "behind" ? "person" : sel.layer;
+  return `
+    <div class="st-sel">
+      <div class="st-sel-head">${popThumb(sel)}<div><b>${title}</b>
+        <div class="meta">a ${showTime(sel.at_ms)} · ${(sel.duration_ms / 1000).toFixed(1).replace(".", ",")} s${sel.status === "proposed" ? " · proposta di Claude" : ""}</div></div>
+        <button class="icon-btn" data-st="close" title="Deseleziona">✕</button></div>
+      <div class="section-title">Livello</div>
+      <div class="seg-toggle st-layer">${LAYERS.map(([id, label]) =>
+        `<button data-st-layer="${id}" class="${layer === id ? "on" : ""}">${label}</button>`).join("")}</div>
+      ${layer === "person" ? `<div class="tx-hint">Nel render passa dietro di te (sagoma calcolata in locale). Nell'anteprima lo vedi trasparente.</div>` : ""}
+      <div class="section-title" style="margin-top:12px">Grandezza <span class="tx-val" id="st-scale-val">${Math.round(v.scale * 100)}%</span></div>
+      <div class="st-row"><input type="range" class="tx-range" data-st-range="scale" min="20" max="500" value="${Math.round(v.scale * 100)}">
+        <div class="seg-toggle small">${SIZES.map(([id, l]) => `<button data-st-size="${id}" class="${sel.size === id ? "on" : ""}">${l}</button>`).join("")}</div></div>
+      <div class="section-title">Rotazione <span class="tx-val" id="st-rotation-val">${Math.round(v.rotation)}°</span></div>
+      <input type="range" class="tx-range" data-st-range="rotation" min="-180" max="180" value="${Math.round(v.rotation)}">
+      <div class="section-title">Durata <span class="tx-val" id="st-duration-val">${(sel.duration_ms / 1000).toFixed(1).replace(".", ",")} s</span></div>
+      <input type="range" class="tx-range" data-st-range="duration" min="4" max="100" value="${Math.round(sel.duration_ms / 100)}">
+      <div class="btn-row tx-actions">
+        <button class="btn" data-st="here" title="Fa partire lo sticker dove c'è la testina">Inizia qui</button>
+        <button class="btn" data-st="center">Centra</button>
+        <button class="btn${sel.sound ? " on" : ""}" data-st="sound">${sel.sound ? "🔊 Suono" : "🔇 Muto"}</button>
+        ${sel.status === "proposed" ? `<button class="btn" data-st="approve">Approva</button>` : ""}
+        <button class="btn danger" data-st="delete">Elimina</button>
+      </div>
+    </div>`;
+}
+
+function stickerPanelHTML() {
+  if (!S.look) {
+    const btns = (S.data?.styles ?? []).map((s) =>
+      `<button class="btn" data-tx-style="${esc(s.id)}">${esc(s.name)}</button>`).join("");
+    return `<div class="placeholder"><svg viewBox="0 0 24 24"><path d="M15 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h7l8-8V6a3 3 0 0 0-3-3h-3z"/><path d="M13 21v-5a3 3 0 0 1 3-3h5"/></svg>
+      <b>Sticker</b><br>Scegli prima uno stile: la libreria cambia tra Viral e Premium.</div>
+      <div class="btn-row tx-styles">${btns}</div>`;
+  }
+  const lib = S.data.stickers ?? { emoji: [], text: [], images: [] };
+  const items = (S.data.popups ?? []).filter((p) => p.status !== "rejected");
+  const sel = popItem(S.popSel);
+  const kindCls = S.look.cards.kind === "sticker" ? "sticker" : "glass";
+  const selBox = sel ? stickerEditHTML(sel) : "";
+  const emoBtn = (e) => `<button class="st-add em" data-st-add="emoji" data-v="${esc(e)}" title="Aggiungi">${emojiHTML(e)}</button>`;
+  const emojis = lib.emoji.map(emoBtn).join("");
+  const cat = S.emoCats[S.emoCat];
+  const keyboard = S.emoCats.length ? `
+    <div class="emo-tabs">${S.emoCats.map((c, i) =>
+      `<button class="${i === S.emoCat ? "on" : ""}" data-st-cat="${i}" title="${esc(EMO_CAT[c.name]?.[0] ?? c.name)}">${emojiHTML(EMO_CAT[c.name]?.[1] ?? c.items[0].e)}</button>`).join("")}</div>
+    <div class="st-grid em keyboard">${cat.items.map((i) => `<button class="st-add em" data-st-add="emoji" data-v="${esc(i.e)}"><img class="emo" src="/media/emoji/${i.img}" alt="" loading="lazy" draggable="false"></button>`).join("")}</div>` : "";
+  const texts = lib.text.map((t) => `<button class="st-add txt ${kindCls}" data-st-add="text" data-v="${esc(t)}"><span>${esc(t)}</span></button>`).join("");
+  const imgs = lib.images.map((im) => `<button class="st-add img" data-st-add="image" data-v="${esc(im.image)}"><img src="${esc(im.url)}" alt="" loading="lazy"></button>`).join("");
+  const list = items.map((p) => `
+    <button class="st-item${p.id === S.popSel ? " on" : ""}" data-st-pick="${esc(p.id)}">
+      ${popThumb(p)}<span class="st-item-t">${showTime(p.at_ms)}
+        <span class="meta">${p.placement === "behind" || p.layer === "person" ? "dietro di te" : p.layer === "over_text" ? "davanti al testo" : "dietro al testo"}${p.status === "proposed" ? " · proposta" : ""}</span></span>
+    </button>`).join("");
+  return `
+    <div class="seg-toggle st-tabs">
+      <button data-st-tab="add" class="${S.stTab === "add" ? "on" : ""}">Aggiungi</button>
+      <button data-st-tab="edit" class="${S.stTab === "edit" ? "on" : ""}" ${sel ? "" : "disabled"}>Modifica${sel ? ` ${popThumb(sel)}` : ""}</button>
+      <button data-st-tab="list" class="${S.stTab === "list" ? "on" : ""}">Nel video (${items.length})</button>
+    </div>
+    ${S.stTab === "edit" && sel ? selBox : S.stTab === "list" ? `
+    <div class="st-list">${list || `<div class="tx-hint">Nessuno sticker per questo stile.</div>`}</div>` : `
+    <div class="tx-hint" style="margin-top:0">Un clic aggiunge lo sticker dove c'è la testina (${esc(S.look.style_name)}). Per spostarlo, ruotarlo, ingrandirlo o metterlo davanti/dietro al testo clicca lo sticker nel video.</div>
+    <div class="st-sub">Più usate</div>
+    <div class="st-grid em">${emojis}</div>
+    ${keyboard ? `<div class="st-sub">Tutte le emoji${cat ? ` · ${esc(EMO_CAT[cat.name]?.[0] ?? cat.name)}` : ""}</div>${keyboard}` : ""}
+    <div class="st-sub">Scritte</div>
+    <div class="st-grid txt">${texts}</div>
+    ${imgs ? `<div class="section-title">Le tue immagini AI</div><div class="st-grid img">${imgs}</div>` : ""}
+    <div class="st-custom"><input id="st-custom" maxlength="16" placeholder="Scrivi un testo o incolla un'emoji">
+      <button class="btn" data-st="custom">Aggiungi</button></div>`}`;
+}
+
+// Posti liberi per un nuovo sticker (centro in % del fotogramma): prima in alto sopra la testa,
+// poi ai lati, così non finisce sulla faccia né sopra un altro sticker dello stesso momento.
+const SLOTS_V = [[50, 20], [24, 26], [76, 26], [26, 52], [74, 52], [50, 12], [30, 14], [70, 14]];
+const SLOTS_H = [[50, 22], [20, 30], [80, 30], [22, 62], [78, 62], [50, 12]];
+
+function freeSlot(atMs) {
+  const busy = (S.data?.popups ?? []).filter((p) => p.status !== "rejected" && p.placement === "free"
+    && p.at_ms < atMs + 2000 && atMs < p.at_ms + p.duration_ms);
+  const slots = S.portrait ? SLOTS_V : SLOTS_H;
+  const free = slots.find(([x, y]) => busy.every((p) => Math.hypot(p.x_pct - x, (p.y_pct - y) * 0.6) > 12));
+  return free ?? slots[busy.length % slots.length];
+}
+
+async function addSticker(kind, value) {
+  video.pause();
+  const atMs = Math.round(nowMs());
+  const [x, y] = freeSlot(atMs);
+  // un po' più grande della taglia M: si vede bene anche nel lettore piccolo
+  const body = { kind, at_ms: atMs, x_pct: x, y_pct: y, scale: kind === "emoji" ? 1.4 : 1 };
+  if (kind === "emoji") body.emoji = value;
+  else if (kind === "text") body.title = value;
+  else body.image = value;
+  const data = await mutate("/api/popups/add", body);
+  if (!data?.added) return;
+  S.popSel = data.added;
+  S.justAdded = data.added;
+  setTimeout(() => { if (S.justAdded === data.added) S.justAdded = null; $("#popup-layer").dataset.key = ""; }, 1400);
+  $("#popup-layer").dataset.key = "";
+  renderTextPanels();
+  toast(`Sticker aggiunto a ${showTime(atMs)}: lo vedi selezionato nel video, trascinalo dove vuoi`);
+}
+
+const ONLY_EMOJI = /^(\p{Extended_Pictographic}|\p{Regional_Indicator}|‍|️|\p{Emoji_Modifier})+$/u;
+
+function wireStickerPanel(box) {
+  box.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-st],[data-st-add],[data-st-pick],[data-st-layer],[data-st-size],[data-st-cat],[data-st-tab]");
+    if (!b || b.disabled) return;
+    const d = b.dataset;
+    if (d.stTab) { S.stTab = d.stTab; renderTextPanels(); return; }
+    if (d.stCat) { S.emoCat = Number(d.stCat); renderTextPanels(); return; }
+    const sel = popItem(S.popSel);
+    if (d.stAdd) { addSticker(d.stAdd, d.v); return; }
+    if (d.stPick) {
+      const p = popItem(d.stPick);
+      video.pause();
+      if (p) seekMs(p.at_ms + 120);
+      selectPop(d.stPick);
+      renderTextPanels();
+      return;
+    }
+    if (d.st === "custom") {
+      const v = box.querySelector("#st-custom").value.trim();
+      if (!v) { toast("Scrivi un testo o incolla un'emoji", true); return; }
+      addSticker(ONLY_EMOJI.test(v) ? "emoji" : "text", v);
+      return;
+    }
+    if (d.st === "close") { S.popSel = null; S.stTab = "add"; renderTextPanels(); return; }
+    if (!sel) return;
+    if (d.stLayer) {
+      const fields = { layer: d.stLayer };
+      // "dietro la persona" automatico → diventa libero quando scegli un altro livello
+      if (sel.placement === "behind" && d.stLayer !== "person") Object.assign(fields, { placement: "free", ...popValues(sel.id), id: undefined });
+      delete fields.id;
+      savePop(sel.id, fields);
+    } else if (d.stSize) savePop(sel.id, { size: d.stSize });
+    else if (d.st === "here") savePop(sel.id, { at_ms: Math.round(nowMs()) }, "Lo sticker parte qui");
+    else if (d.st === "center") savePop(sel.id, { placement: "free", x_pct: 50, y_pct: popValues(sel.id).y_pct, rotation: 0 });
+    else if (d.st === "sound") savePop(sel.id, { sound: !sel.sound });
+    else if (d.st === "approve") mutate("/api/popups/item", { id: sel.id, action: "approve" });
+    else if (d.st === "delete") deletePop(sel.id);
+  });
+  box.addEventListener("input", (e) => {
+    const r = e.target.closest("[data-st-range]");
+    if (!r || !S.popSel) return;
+    S.txSliding = r;
+    const k = r.dataset.stRange;
+    const v = Number(r.value);
+    const label = box.querySelector(`#st-${k}-val`);
+    if (k === "duration") { label.textContent = `${(v / 10).toFixed(1).replace(".", ",")} s`; return; }
+    S.popLive = { ...popValues(S.popSel), [k]: k === "scale" ? v / 100 : v };
+    label.textContent = k === "scale" ? `${v}%` : `${v}°`;
+    paintPopLive();
+  });
+  box.addEventListener("change", async (e) => {
+    const r = e.target.closest("[data-st-range]");
+    if (!r || !S.popSel) return;
+    S.txSliding = null;
+    const k = r.dataset.stRange;
+    const v = Number(r.value);
+    if (k === "duration") { await savePop(S.popSel, { duration_ms: v * 100 }); return; }
+    const live = { ...popValues(S.popSel) };
+    await savePop(S.popSel, { placement: "free", x_pct: Math.round(live.x_pct * 10) / 10, y_pct: Math.round(live.y_pct * 10) / 10,
+      scale: Math.round(live.scale * 100) / 100, rotation: Math.round(live.rotation) });  // prettier-ignore
+    S.popLive = null;
+  });
+  box.addEventListener("keydown", (e) => {
+    if (e.target.id === "st-custom" && e.key === "Enter") { e.preventDefault(); box.querySelector('[data-st="custom"]').click(); }
+  });
+}
+
+async function deletePop(id) {
+  S.popSel = null;
+  if (S.stTab === "edit") S.stTab = "add";
+  await mutate("/api/popups/item", { id, action: "delete" }, "Sticker eliminato");
+}
+
+// --- immagini: cerca sul web, scontorna, metti nel video (pannello Immagini) ------------
+// Solo l'utente mette le immagini: Claude non le inserisce mai da solo.
+
+const IMG_PHASE = {
+  queued: "In coda…", reading: "Leggo il file…", downloading: "Scarico la foto…",
+  model: "Scarico il modello per scontornare (solo la prima volta)", loading: "Preparo lo scontorno…",
+  cutting: "Scontorno…", done: "Fatto",
+};  // prettier-ignore
+const IMG_HINTS = ["Francesco Totti", "Leonardo DiCaprio", "Lamborghini Urus", "Colosseo"];
+
+const isPhoto = (p) => Boolean(p?.image && p.image.startsWith("images/"));
+
+function imgJobLine(j) {
+  const pct = j.progress != null ? Math.round(j.progress * 100) : null;
+  const what = j.status === "error" ? `Non riuscito: ${j.error}` : `${IMG_PHASE[j.phase] ?? "…"}${pct != null ? ` ${pct}%` : ""}`;
+  return `
+    <div class="img-job${j.status === "error" ? " err" : ""}">
+      ${j.thumb ? `<img src="${esc(j.thumb)}" alt="">` : `<span class="st-thumb">🖼</span>`}
+      <div class="img-job-t"><b>${esc(j.title || "Immagine")}</b><span class="meta">${esc(what)}</span>
+        ${j.status === "error" ? "" : `<div class="img-bar"><i style="width:${pct ?? 35}%" class="${pct == null ? "indef" : ""}"></i></div>`}</div>
+      ${j.status === "error" ? `<button class="icon-btn" data-img-act="drop-job" data-v="${esc(j.id)}" title="Chiudi">✕</button>` : ""}
+    </div>`;
+}
+
+function imagesPanelHTML() {
+  const sel = popItem(S.popSel);
+  const photo = isPhoto(sel) ? sel : null;
+  const jobs = Object.values(S.imgJobs).map(imgJobLine).join("");
+  const res = S.imgRes ?? [];
+  const results = res.map((r, i) => `
+    <button class="img-res" data-img-add="${i}" title="${esc(r.title)}${r.license ? ` · ${esc(r.license)}` : ""}">
+      <img src="${esc(r.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" draggable="false">
+      <span class="img-src">${esc(r.license ? "✓ libera · " + r.source : r.source)}</span></button>`).join("");
+  const mine = (S.data?.images ?? []).map((m) => `
+    <button class="img-res mine" data-img-mine="${esc(m.image)}" title="${esc(m.title || "")}">
+      <img src="${esc(m.url)}" alt="" loading="lazy" draggable="false"></button>`).join("");
+  let selBox = "";
+  if (photo) {
+    const spec = stickerSpec(photo.id);
+    const meta = (S.data?.images ?? []).find((m) => m.image === photo.image) ?? {};
+    selBox = `
+      ${stickerEditHTML(photo, "Immagine selezionata")}
+      <div class="st-sel img-fix">
+        <div class="section-title">Scontorno ${meta.cutout === false ? "· foto intera" : meta.quality === "best" ? "· qualità massima" : "· qualità rapida"}</div>
+        <div class="btn-row tx-actions">
+          ${meta.quality !== "best" || meta.cutout === false ? `<button class="btn" data-img-act="redo-best" ${S.imgRedo ? "disabled" : ""} title="Più lento (~20 s) ma bordi e capelli molto più puliti">✂ Qualità massima</button>` : ""}
+          ${meta.cutout === false ? `<button class="btn" data-img-act="redo-fast" ${S.imgRedo ? "disabled" : ""}>✂ Scontorna</button>`
+            : `<button class="btn" data-img-act="redo-full" ${S.imgRedo ? "disabled" : ""}>Foto intera</button>`}
+        </div>
+        ${meta.source ? `<div class="tx-hint">Da ${esc(meta.source)}${meta.license ? ` · ${esc(meta.license)}` : ""}${meta.page ? ` · <a href="${esc(meta.page)}" target="_blank" rel="noopener noreferrer">pagina</a>` : ""}</div>` : ""}
+      </div>
+      <div class="st-sel" data-fx-scope="sticker">
+        <div class="section-title">Animazione <button class="link" data-fx-act="preview-sticker">▶ Anteprima</button></div>
+        ${S.data?.effects ? fxPhaseBlock("in", "sticker", spec) + fxPhaseBlock("out", "sticker", spec)
+          : `<div class="tx-hint">Scegli uno stile (Viral o Premium) per avere le animazioni di entrata e uscita.</div>`}
+      </div>`;
+  }
+  return `
+    <div class="img-ask">
+      <div class="img-ask-row">
+        <input id="img-q" placeholder="Chiedi un'immagine… es. Francesco Totti che esulta" value="${esc(S.imgQ)}" autocomplete="off">
+        <button class="btn ai" data-img-act="search" ${S.imgBusy ? "disabled" : ""}>${S.imgBusy ? "Cerco…" : "Cerca"}</button>
+      </div>
+      <div class="img-opts">
+        <button class="chip${S.imgCut ? " on" : ""}" data-img-opt="cut" title="Toglie lo sfondo e lascia solo la persona o l'oggetto">✂ Scontorna</button>
+        ${S.imgCut ? `<span class="seg-toggle small img-q">
+          <button data-img-quality="fast" class="${S.imgQuality === "fast" ? "on" : ""}" title="~2 secondi">Rapida</button>
+          <button data-img-quality="best" class="${S.imgQuality === "best" ? "on" : ""}" title="~20 secondi, bordi e capelli più puliti">Massima</button></span>` : ""}
+        <button class="chip${S.imgTransp ? " on" : ""}" data-img-opt="transp" title="Solo PNG che sono già senza sfondo">Già trasparenti</button>
+        <button class="chip${S.imgFree ? " on" : ""}" data-img-opt="free" title="Solo foto con licenza libera (Wikimedia Commons)">Licenza libera</button>
+        <button class="chip" data-img-act="upload" title="Usa una foto del tuo PC (puoi anche trascinarla qui)">⬆ Dal PC</button>
+        <input type="file" id="img-file" accept="image/*" hidden>
+      </div>
+    </div>
+    ${jobs ? `<div class="img-jobs">${jobs}</div>` : ""}
+    ${selBox}
+    ${S.imgErr ? `<div class="tx-hint err">${esc(S.imgErr)}</div>` : ""}
+    ${res.length ? `<div class="st-sub">Risultati per «${esc(S.imgShown)}» · clic = scontorna e metti nel video a ${showTime(nowMs())}</div>
+      <div class="img-grid">${results}</div>`
+      : S.imgShown && !S.imgBusy ? `<div class="tx-hint">Nessuna immagine trovata per «${esc(S.imgShown)}».</div>`
+      : !photo ? `<div class="tx-hint" style="margin-top:0">Scrivi chi o cosa ti serve: cerco sul web come nel browser. Clicchi una foto, la scontorno e la metto nel video dove c'è la testina; poi la sposti, la ingrandisci e le dai un'animazione.</div>
+        <div class="img-ideas">${IMG_HINTS.map((h) => `<button class="chip" data-img-try="${esc(h)}">${esc(h)}</button>`).join("")}</div>` : ""}
+    ${mine ? `<div class="st-sub">Le tue immagini</div><div class="img-grid mine">${mine}</div>` : ""}
+    <div class="tx-hint">Le foto del web hanno quasi sempre un copyright: per i video da pubblicare preferisci «Licenza libera» o foto tue.</div>`;
+}
+
+async function imgSearch(q) {
+  q = (q ?? S.imgQ).trim();
+  if (!q) { toast("Scrivi cosa cercare", true); return; }
+  S.imgQ = q;
+  S.imgBusy = true;
+  S.imgErr = "";
+  renderTextPanels();
+  try {
+    const params = new URLSearchParams({ q, transparent: S.imgTransp ? "1" : "0", free: S.imgFree ? "1" : "0" });
+    const data = await api(`/api/images/search?${params}`);
+    S.imgRes = data.results;
+    S.imgShown = data.query;
+  } catch (e) {
+    S.imgErr = `Ricerca non riuscita: ${e.message}`;
+  } finally {
+    S.imgBusy = false;
+    renderTextPanels();
+  }
+}
+
+// Dove mettere una foto scontornata: in basso, appoggiata al bordo (come i meme con i
+// personaggi in fila). Accanto alle altre foto dello stesso momento.
+function photoSpot(atMs, w, h) {
+  const fw = S.portrait ? 9 : 16, fh = S.portrait ? 16 : 9;
+  const width = 0.64; // taglia L = 64% della larghezza
+  let scale = 1;
+  let hPct = width * (h / Math.max(1, w)) * (fw / fh) * 100;
+  const maxH = S.portrait ? 48 : 62;
+  if (hPct > maxH) { scale = maxH / hPct; hPct = maxH; }
+  const busy = (S.data?.popups ?? []).filter((p) => isPhoto(p) && p.status !== "rejected"
+    && p.at_ms < atMs + 2500 && atMs < p.at_ms + p.duration_ms);
+  const xs = [50, 24, 76, 37, 63];
+  const x = xs.find((v) => busy.every((p) => Math.abs(p.x_pct - v) > 10)) ?? xs[busy.length % xs.length];
+  return { x_pct: x, y_pct: Math.round((100 - hPct / 2 + 1) * 10) / 10, scale: Math.round(scale * 100) / 100 };
+}
+
+// Se la testina è su una parte tagliata, la foto parte dall'inizio del pezzo tenuto dopo.
+function keptMs(ms) {
+  const r = (S.eff ?? []).find((x) => x.state === "keep" && x.end_ms > ms);
+  return r && ms < r.start_ms ? r.start_ms + 80 : ms;
+}
+
+async function placePhoto(image, atMs, w, h, cutout) {
+  atMs = keptMs(atMs);
+  const spot = cutout ? photoSpot(atMs, w, h) : { x_pct: 50, y_pct: S.portrait ? 30 : 40, scale: 0.8 };
+  const data = await mutate("/api/popups/add", { kind: "image", image, cutout, at_ms: atMs, size: "large", duration_ms: 2500, sound: false, ...spot });
+  if (!data?.added) return;
+  S.popSel = data.added;
+  S.justAdded = data.added;
+  setTimeout(() => { if (S.justAdded === data.added) S.justAdded = null; $("#popup-layer").dataset.key = ""; }, 1400);
+  $("#popup-layer").dataset.key = "";
+  seekMs(atMs + 400);
+  renderTextPanels();
+  toast(`Immagine messa a ${showTime(atMs)}: trascinala nel video dove vuoi`);
+}
+
+async function runImageJob(body, card, onDone) {
+  let job;
+  try {
+    job = await api("/api/images/add", body);
+  } catch (e) {
+    toast(`Non riesco a preparare l'immagine: ${e.message}`, true);
+    return;
+  }
+  S.imgJobs[job.id] = { ...job, ...card };
+  renderTextPanels();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 450));
+    try { job = await api(`/api/images/job/${job.id}`); } catch { continue; }
+    S.imgJobs[job.id] = { ...job, ...card };
+    if (job.status !== "running") break;
+    renderTextPanels();
+  }
+  if (job.status === "done") {
+    delete S.imgJobs[job.id];
+    await onDone(job);
+  }
+  renderTextPanels();
+}
+
+function imgAddResult(r) {
+  video.pause();
+  const atMs = Math.round(nowMs());
+  const body = { url: r.url, thumb: r.thumb, page: r.page, title: r.title, source: r.source, license: r.license, cutout: S.imgCut, quality: S.imgQuality };
+  runImageJob(body, { title: r.title || S.imgShown, thumb: r.thumb }, (job) => placePhoto(job.image, atMs, job.width, job.height, job.cutout));
+}
+
+function imgUpload(file) {
+  if (!file || !file.type.startsWith("image/")) { toast("Scegli un file immagine (JPG, PNG, WebP)", true); return; }
+  if (file.size > 25 * 1024 * 1024) { toast("Immagine troppo pesante (oltre 25 MB)", true); return; }
+  video.pause();
+  const atMs = Math.round(nowMs());
+  const fr = new FileReader();
+  fr.onload = () => runImageJob({ data: fr.result, title: file.name, source: "il tuo PC", cutout: S.imgCut, quality: S.imgQuality },
+    { title: file.name, thumb: fr.result }, (job) => placePhoto(job.image, atMs, job.width, job.height, job.cutout));
+  fr.readAsDataURL(file);
+}
+
+function imgRedo(photo, cutout, quality) {
+  S.imgRedo = true;
+  renderTextPanels();
+  const meta = (S.data?.images ?? []).find((m) => m.image === photo.image) ?? {};
+  runImageJob({ redo: photo.image, cutout, quality }, { title: cutout ? (quality === "best" ? "Scontorno in qualità massima" : "Scontorno") : "Foto intera", thumb: meta.url },
+    async () => { await savePop(photo.id, { cutout }, cutout ? "Scontorno rifatto" : "Ora è la foto intera"); })
+    .finally(() => { S.imgRedo = false; renderTextPanels(); });
+}
+
+function wireImagesPanel(box) {
+  box.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-img-act],[data-img-add],[data-img-mine],[data-img-opt],[data-img-quality],[data-img-try]");
+    if (!b || b.disabled) return;
+    const d = b.dataset;
+    if (d.imgAdd) { const r = S.imgRes?.[Number(d.imgAdd)]; if (r) imgAddResult(r); return; }
+    if (d.imgMine) {
+      video.pause();
+      const atMs = Math.round(nowMs());
+      const img = new Image();
+      img.onload = () => placePhoto(d.imgMine, atMs, img.naturalWidth, img.naturalHeight, ((S.data.images ?? []).find((m) => m.image === d.imgMine)?.cutout) !== false);
+      img.src = b.querySelector("img").src;
+      return;
+    }
+    if (d.imgTry) { S.imgQ = d.imgTry; imgSearch(d.imgTry); return; }
+    if (d.imgQuality) { S.imgQuality = d.imgQuality; renderTextPanels(); return; }
+    if (d.imgOpt === "cut") S.imgCut = !S.imgCut;
+    else if (d.imgOpt === "transp") { S.imgTransp = !S.imgTransp; if (S.imgTransp) S.imgFree = false; }
+    else if (d.imgOpt === "free") { S.imgFree = !S.imgFree; if (S.imgFree) S.imgTransp = false; }
+    if (d.imgOpt) { renderTextPanels(); if (S.imgShown && d.imgOpt !== "cut") imgSearch(S.imgQ); return; }
+    const photo = popItem(S.popSel);
+    if (d.imgAct === "search") imgSearch(box.querySelector("#img-q").value);
+    else if (d.imgAct === "upload") box.querySelector("#img-file").click();
+    else if (d.imgAct === "drop-job") { delete S.imgJobs[d.v]; renderTextPanels(); }
+    else if (photo && d.imgAct === "redo-best") imgRedo(photo, true, "best");
+    else if (photo && d.imgAct === "redo-fast") imgRedo(photo, true, S.imgQuality);
+    else if (photo && d.imgAct === "redo-full") imgRedo(photo, false, "fast");
+  });
+  box.addEventListener("input", (e) => { if (e.target.id === "img-q") S.imgQ = e.target.value; });
+  box.addEventListener("keydown", (e) => {
+    if (e.target.id === "img-q" && e.key === "Enter") { e.preventDefault(); imgSearch(e.target.value); }
+  });
+  box.addEventListener("change", (e) => {
+    if (e.target.id === "img-file") { imgUpload(e.target.files?.[0]); e.target.value = ""; }
+  });
+  box.addEventListener("dragover", (e) => {
+    if (!isImagesBox(box) || !e.dataTransfer?.types.includes("Files")) return;
+    e.preventDefault();
+    box.classList.add("img-drop");
+  });
+  box.addEventListener("dragleave", () => box.classList.remove("img-drop"));
+  box.addEventListener("drop", (e) => {
+    box.classList.remove("img-drop");
+    if (!isImagesBox(box) || !e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    imgUpload(e.dataTransfer.files[0]);
+  });
+}
+
+function isImagesBox(box) {
+  return box.id === "viewer-panel" ? S.viewerTab === "images" : S.leftTab === "images";
+}
+
+// --- effetti: animazioni di testo e sticker, transizioni (pannello Effetti) -------------
+// Le animazioni usano lo stesso motore del render (/anim.js = motion/src/anim.js).
+// Le transizioni nell'anteprima sono un'approssimazione su un solo video; il render le fa vere.
+
+const FX_PHASE = { in: "Entrata", out: "Uscita", loop: "In loop" };
+const KIND_LABEL = { cut: "taglio", scene: "cambio scena" };
+
+function fxRes() {
+  return S.data?.effects?.resolved ?? null;
+}
+
+function captionSpec() {
+  const r = fxRes();
+  if (r) return r.captions;
+  const a = S.look?.captions.animation;
+  return { in: { type: a === "pop" ? "pop" : a === "blur_in" ? "words_blur" : "none", ms: 320 }, out: { type: "none", ms: 200 } };
+}
+
+function stickerSpec(id) {
+  const r = fxRes();
+  if (!r) return null;
+  return r.stickers[id] ?? r.sticker_default;
+}
+
+// Parole della frase con il loro tempo (il testo riscritto a mano si spalma sulla frase).
+function chunkWordTimes(chunk, count) {
+  const ws = chunk.ws ?? [chunk.start];
+  if (count === ws.length) return ws;
+  const a = ws[0], b = ws[ws.length - 1];
+  return Array.from({ length: count }, (_, k) => Math.round(a + ((b - a) * k) / Math.max(1, count - 1)));
+}
+
+function applyCss(el, css) {
+  el.style.opacity = String(css.opacity);
+  el.style.transform = css.transform === "none" ? "" : css.transform;
+  el.style.filter = css.filter === "none" ? "" : css.filter;
+  el.style.clipPath = css.clipPath === "none" ? "" : css.clipPath;
+}
+
+function updateCaptionFx(cur) {
+  const capEl = $("#caption");
+  const chunk = S.chunks[S.lastChunk];
+  if (!S.look || !chunk) { applyCss(capEl, { opacity: 1, transform: "none", filter: "none", clipPath: "none" }); return; }
+  const spec = captionSpec();
+  const t = cur - chunk.start;
+  const dur = chunk.end + 250 - chunk.start;
+  const perWord = spec.in.type === "words_blur" || spec.in.type === "words_pop";
+  const st = animState({ inSpec: perWord ? null : spec.in, outSpec: spec.out, t, dur });
+  applyCss(capEl, animCss(st, chunkCaps(chunk)?.emphasis?.color ?? "#FFFFFF"));
+  const words = capEl.querySelectorAll(".cw");
+  if (perWord) {
+    const times = chunkWordTimes(chunk, words.length);
+    words.forEach((w, i) => applyCss(w, animCss(wordState(spec.in.type, cur - times[i], spec.in.ms))));
+  } else if (words.length && words[0].style.opacity) {
+    words.forEach((w) => applyCss(w, { opacity: 1, transform: "none", filter: "none", clipPath: "none" }));
+  }
+}
+
+function updatePopupFx(cur) {
+  document.querySelectorAll(".pop-el[data-id]").forEach((el) => {
+    const p = popItem(el.dataset.id);
+    const spec = p && stickerSpec(p.id);
+    if (!spec || S.popLive?.id === p.id) return;
+    const st = animState({ inSpec: spec.in, outSpec: spec.out, loopSpec: spec.loop, t: cur - p.at_ms, dur: p.duration_ms });
+    applyCss(el, animCss(st));
+  });
+}
+
+// Transizione nell'anteprima: vicino a una giunta del montato muove il video (approssimato).
+function transitionFx(cur) {
+  const pts = S.data?.effects?.points ?? [];
+  if (S.mode !== "edited" || !pts.length) return null;
+  const e = editedAt(cur);
+  for (const b of pts) {
+    const tr = b.transition;
+    if (!tr) continue;
+    const je = editedAt(b.at_ms);
+    const half = tr.ms / 2;
+    if (e < je - half || e > je + half) continue;
+    const k = (e - (je - half)) / tr.ms;
+    const peak = 1 - Math.abs(k - 0.5) * 2;
+    const side = k < 0.5 ? -k * 2 : (1 - k) * 2; // -1..0..1
+    switch (tr.type) {
+      case "zoom": return { tf: `scale(${1 + 0.3 * peak})`, blur: peak * 6 };
+      case "whip": case "slide_left": case "push_cut": return { tf: `translateX(${side * 35}%)`, blur: peak * (tr.type === "whip" ? 10 : 2), flash: tr.type === "push_cut" ? peak * 0.6 : 0 };
+      case "slide_up": return { tf: `translateY(${side * 35}%)`, blur: peak * 2 };
+      case "flash": return { flash: peak };
+      case "blur": return { blur: peak * 10, dim: peak * 0.2 };
+      case "cube": case "flip": return { tf: `perspective(600px) rotateY(${side * 60}deg)`, dim: peak * 0.4 };
+      default: return { dim: peak }; // fade, passaggio al nero, tendina, iride, orologio
+    }
+  }
+  return null;
+}
+
+function updateTransitionFx(cur) {
+  const fx = transitionFx(cur);
+  S.transTf = fx?.tf ?? "";
+  const grade = S.look ? S.look.grade.css_filter : "";
+  const blur = fx?.blur ? ` blur(${fx.blur.toFixed(1)}px)` : "";
+  const filter = (grade + blur).trim();
+  if (video.style.filter !== filter) video.style.filter = filter;
+  const ov = $("#trans-fx");
+  ov.style.background = fx?.flash ? "#fff" : "#000";
+  ov.style.opacity = String(fx?.flash ?? fx?.dim ?? 0);
+}
+
+// --- timeline: un rombo a ogni giunta (pieno se c'è una transizione) ------------------------
+
+function renderTransitionMarks() {
+  const box = $("#tl-trans");
+  if (!box) return;
+  const pts = S.data?.effects?.points ?? [];
+  box.innerHTML = pts.map((b) => `
+    <button class="tmark${b.transition ? " on" : ""}${b.id === S.fxPoint ? " sel" : ""}${b.kind === "scene" ? " scene" : ""}"
+      data-fx-point="${esc(b.id)}" style="left:${xOf(b.at_ms)}px"
+      title="${b.transition ? esc(transLabel(b.transition.type)) : "Taglio netto"} · ${KIND_LABEL[b.kind]}${b.block ? " (nuovo blocco)" : ""}"></button>`).join("");
+}
+
+function transLabel(id) {
+  return (S.data?.effects?.transitions ?? []).find((t) => t.id === id)?.label ?? id;
+}
+
+// --- pannello ---------------------------------------------------------------------------
+
+function fxGallery(phase, target, current) {
+  const fx = S.data.effects;
+  const sid = fx.style ?? "viral";
+  const text = target === "captions";
+  const list = fx.anims.filter((a) => a.phase === phase && (S.fxAll || a.sets.includes(sid)) && (text || !a.text_only));
+  return `<div class="fx-grid">${list.map((a) => `
+    <button class="fx-card${a.id === current.type ? " on" : ""}" data-fx-pick="${a.id}" data-fx-phase="${phase}" data-fx-demo="${a.id}">
+      <span class="fx-demo"><span class="fx-demo-in">${text ? "Aa" : emojiHTML("🔥")}</span></span>
+      <span class="fx-name">${esc(a.label)}</span></button>`).join("")}</div>`;
+}
+
+function fxPhaseBlock(phase, target, spec) {
+  const cur = spec[phase] ?? { type: "none", ms: 300, speed: 1 };
+  const slider = phase === "loop"
+    ? `<div class="section-title">Velocità <span class="tx-val" id="fx-${phase}-val">${cur.speed.toFixed(2).replace(".", ",")}×</span></div>
+       <input type="range" class="tx-range" data-fx-range="${phase}" data-fx-key="speed" min="25" max="400" value="${Math.round(cur.speed * 100)}">`
+    : `<div class="section-title">Durata <span class="tx-val" id="fx-${phase}-val">${(cur.ms / 1000).toFixed(2).replace(".", ",")} s</span></div>
+       <input type="range" class="tx-range" data-fx-range="${phase}" data-fx-key="ms" min="100" max="${phase === "in" ? 1500 : 1200}" step="10" value="${cur.ms}">`;
+  return `<div class="fx-phase"><div class="fx-phase-title">${FX_PHASE[phase]}</div>${fxGallery(phase, target, cur)}${cur.type !== "none" ? slider : ""}</div>`;
+}
+
+function effectsPanelHTML() {
+  if (!S.look || !S.data?.effects) {
+    const btns = (S.data?.styles ?? []).map((s) => `<button class="btn" data-tx-style="${esc(s.id)}">${esc(s.name)}</button>`).join("");
+    return `<div class="placeholder"><svg viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg>
+      <b>Effetti</b><br>Scegli prima uno stile: ogni preset ha la sua galleria di effetti.</div><div class="btn-row tx-styles">${btns}</div>`;
+  }
+  const fx = S.data.effects;
+  const res = fx.resolved;
+  const claude = `
+    <div class="fx-claude">
+      <button class="btn ai" data-fx-act="suggest" ${S.fxBusy ? "disabled" : ""}>${S.fxBusy ? "Claude sta componendo…" : "✦ Fai scegliere a Claude"}</button>
+      <div class="tx-hint">${S.fxBusy ? "Guarda parlato, tagli e sticker e sceglie effetti e transizioni per lo stile " + esc(S.look.style_name) + "."
+        : res.note ? esc(res.note) : res.suggested ? "Effetti scelti da Claude: cambiali come vuoi." : "Valori di partenza del preset " + esc(S.look.style_name) + "."}</div>
+    </div>`;
+  const tabs = `
+    <div class="seg-toggle st-tabs">
+      <button data-fx-tab="text" class="${S.fxTab === "text" ? "on" : ""}">Testo</button>
+      <button data-fx-tab="stickers" class="${S.fxTab === "stickers" ? "on" : ""}">Sticker</button>
+      <button data-fx-tab="trans" class="${S.fxTab === "trans" ? "on" : ""}">Transizioni (${fx.points.filter((b) => b.transition).length})</button>
+    </div>`;
+  const all = `<label class="fx-all"><input type="checkbox" data-fx-all ${S.fxAll ? "checked" : ""}> mostra anche gli effetti dell'altro stile</label>`;
+  let body = "";
+  if (S.fxTab === "text") {
+    body = `<div class="tx-hint">Valgono per tutti i sottotitoli. <button class="link" data-fx-act="preview-text">▶ Anteprima</button></div>
+      ${fxPhaseBlock("in", "captions", res.captions)}${fxPhaseBlock("out", "captions", res.captions)}${all}`;
+  } else if (S.fxTab === "stickers") {
+    const sel = popItem(S.popSel);
+    const own = sel && res.stickers[sel.id];
+    const spec = sel ? stickerSpec(sel.id) : res.sticker_default;
+    body = `
+      <div class="seg-toggle st-layer">
+        <button data-fx-starget="default" class="${!sel ? "on" : ""}">Tutti gli sticker</button>
+        <button data-fx-starget="sel" class="${sel ? "on" : ""}" ${S.popSel || S.fxLastPop ? "" : "disabled"}>${sel ? `Selezionato ${popThumb(sel)}` : "Sticker selezionato"}</button>
+      </div>
+      <div class="tx-hint">${sel ? `${own ? "Ha effetti suoi." : "Usa gli effetti di tutti gli sticker."} <button class="link" data-fx-act="preview-sticker">▶ Anteprima</button>${own ? ` · <button class="link" data-fx-act="reset-sticker">Ripristina</button>` : ""}`
+        : "Clicca uno sticker nel video per dargli effetti suoi."}</div>
+      ${fxPhaseBlock("in", "sticker", spec)}${fxPhaseBlock("out", "sticker", spec)}${fxPhaseBlock("loop", "sticker", spec)}${all}`;
+  } else {
+    const pt = fx.points.find((b) => b.id === S.fxPoint) ?? null;
+    const list = fx.points.map((b) => `
+      <button class="st-item${b.id === S.fxPoint ? " on" : ""}" data-fx-point="${esc(b.id)}">
+        <span class="t-ico${b.transition ? " on" : ""}">◆</span>
+        <span class="st-item-t">${showTime(b.at_ms)} · ${b.transition ? esc(transLabel(b.transition.type)) : "taglio netto"}
+          <span class="meta">${KIND_LABEL[b.kind]}${b.block ? " · nuovo blocco" : ""}${b.gap_ms ? ` · tolti ${(b.gap_ms / 1000).toFixed(1).replace(".", ",")} s` : ""}</span></span>
+      </button>`).join("");
+    let editor = "";
+    if (pt) {
+      const sid = fx.style ?? "viral";
+      const cur = pt.transition ?? { type: "none", ms: 300 };
+      const own = res.transitions[pt.id];
+      const cards = fx.transitions.filter((t) => S.fxAll || t.sets.includes(sid)).map((t) => `
+        <button class="fx-card tr${t.id === cur.type ? " on" : ""}" data-fx-trans="${t.id}">
+          <span class="fx-demo tr-demo" data-tr="${t.id}"><i class="a"></i><i class="b"></i></span>
+          <span class="fx-name">${esc(t.label)}${t.source === "remotion" ? ' <em class="src">Remotion</em>' : ""}</span></button>`).join("");
+      editor = `
+        <div class="st-sel">
+          <div class="st-sel-head"><span class="st-thumb">◆</span><div><b>Giunta a ${showTime(pt.at_ms)}</b>
+            <div class="meta">${KIND_LABEL[pt.kind]}${pt.block ? " dopo una pausa lunga" : ""}${pt.diff != null ? ` · differenza immagine ${pt.diff}` : ""}</div></div>
+            <button class="icon-btn" data-fx-act="close-point" title="Chiudi">✕</button></div>
+          <div class="fx-grid">${cards}</div>
+          ${cur.type !== "none" ? `<div class="section-title">Durata <span class="tx-val" id="fx-trans-val">${(cur.ms / 1000).toFixed(2).replace(".", ",")} s</span></div>
+            <input type="range" class="tx-range" data-fx-trange min="100" max="1500" step="10" value="${cur.ms}">` : ""}
+          <div class="btn-row tx-actions">
+            <button class="btn" data-fx-act="preview-trans">▶ Anteprima</button>
+            <button class="btn" data-fx-act="all-trans" ${cur.type === "none" ? "disabled" : ""}>Applica a tutte</button>
+            ${own ? `<button class="btn" data-fx-act="auto-trans">Torna all'automatico</button>` : ""}
+          </div>
+          <div class="tx-hint">Nell'anteprima la transizione è approssimata; nel render è quella vera.</div>
+        </div>`;
+    }
+    body = `${editor}<div class="tx-hint">${fx.points.length} punti dove due clip si toccano: clicca un punto (anche il rombo nella timeline) per scegliere la transizione.</div>
+      <div class="st-list">${list || `<div class="tx-hint">Nessun taglio nel montato.</div>`}</div>${all}`;
+  }
+  return claude + tabs + body;
+}
+
+async function saveFx(body, msg) {
+  await mutate("/api/effects", body, msg);
+}
+
+function fxTarget(el) {
+  if (S.fxTab === "text" && !el?.closest('[data-fx-scope="sticker"]')) return { target: "captions" };
+  return S.popSel ? { target: "sticker", item: S.popSel } : { target: "sticker_default" };
+}
+
+async function fxSuggest() {
+  if (S.fxBusy) return;
+  S.fxBusy = true;
+  renderTextPanels();
+  try {
+    const data = await api("/api/effects/suggest", {});
+    apply(data);
+    toast(data.message ?? "Effetti scelti da Claude");
+  } catch (e) {
+    toast(`Claude non ha risposto: ${e.message}`, true);
+  } finally {
+    S.fxBusy = false;
+    renderTextPanels();
+  }
+}
+
+// Anteprima di un effetto sulla card: l'"Aa" (o l'emoji) si anima con lo stesso motore.
+function runCardDemo(card) {
+  const el = card.querySelector(".fx-demo-in");
+  if (!el) return;
+  const type = card.dataset.fxDemo, phase = card.dataset.fxPhase;
+  const t0 = performance.now();
+  const step = () => {
+    if (!card.matches(":hover")) { applyCss(el, { opacity: 1, transform: "none", filter: "none", clipPath: "none" }); return; }
+    const t = (performance.now() - t0) % 1600;
+    const spec = { type, ms: 600, speed: 1 };
+    const st = phase === "in" ? animState({ inSpec: spec, t, dur: 1600 })
+      : phase === "out" ? animState({ outSpec: spec, t: t + 600, dur: 1600 })
+      : animState({ loopSpec: spec, t, dur: 1600 });
+    applyCss(el, animCss(type.startsWith("words") ? wordState(type, t, 600) : st, "#1FD3CF"));
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function wireEffectsPanel(box) {
+  box.addEventListener("mouseover", (e) => {
+    const card = e.target.closest("[data-fx-demo]");
+    if (card && !card.dataset.running) {
+      card.dataset.running = "1";
+      runCardDemo(card);
+      card.addEventListener("mouseleave", () => delete card.dataset.running, { once: true });
+    }
+  });
+  box.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-fx-tab],[data-fx-pick],[data-fx-act],[data-fx-point],[data-fx-trans],[data-fx-starget],[data-fx-all]");
+    if (!b || b.disabled) return;
+    const d = b.dataset;
+    if (d.fxTab) { S.fxTab = d.fxTab; renderTextPanels(); return; }
+    if ("fxAll" in d) { S.fxAll = b.checked; renderTextPanels(); return; }
+    if (d.fxStarget) {
+      if (d.fxStarget === "default") { S.fxLastPop = S.popSel ?? S.fxLastPop; S.popSel = null; }
+      else S.popSel = S.popSel ?? S.fxLastPop;
+      renderTextPanels();
+      return;
+    }
+    if (d.fxPick) {
+      const phase = d.fxPhase;
+      const tg = fxTarget(b);
+      const base = (tg.target === "captions" ? captionSpec() : S.popSel ? stickerSpec(S.popSel) : fxRes().sticker_default)[phase];
+      const ms = d.fxPick === "none" ? 0 : base && base.type !== "none" ? base.ms : phase === "loop" ? 0 : 350;
+      await saveFx({ ...tg, phase, spec: { type: d.fxPick, ms, speed: base?.speed ?? 1 } });
+      return;
+    }
+    if (d.fxPoint) { selectPoint(d.fxPoint); return; }
+    if (d.fxTrans) {
+      const cur = (S.data.effects.points.find((x) => x.id === S.fxPoint)?.transition) ?? null;
+      const dflt = (S.data.effects.style === "premium" ? 500 : 300);
+      await saveFx({ target: "transition", item: S.fxPoint, spec: { type: d.fxTrans, ms: cur?.ms ?? dflt } });
+      return;
+    }
+    const act = d.fxAct;
+    if (act === "suggest") fxSuggest();
+    else if (act === "close-point") { S.fxPoint = null; renderTextPanels(); renderTransitionMarks(); }
+    else if (act === "reset-sticker") {
+      for (const phase of ["in", "out", "loop"]) await saveFx({ target: "sticker", item: S.popSel, phase, spec: null });
+    } else if (act === "auto-trans") saveFx({ target: "transition", item: S.fxPoint, spec: null });
+    else if (act === "all-trans") {
+      const cur = S.data.effects.points.find((x) => x.id === S.fxPoint)?.transition;
+      if (cur) saveFx({ target: "all_transitions", spec: { type: cur.type, ms: cur.ms } }, "Transizione applicata a tutte le giunte");
+    } else if (act === "preview-trans") {
+      const pt = S.data.effects.points.find((x) => x.id === S.fxPoint);
+      if (pt) { setMode("edited"); playWindow(prevKept(pt.at_ms, 1200), pt.end_ms + 1200); }
+    } else if (act === "preview-text") {
+      const c = S.chunks[S.txChunk] ?? S.chunks.find((x) => x.start >= nowMs());
+      if (c) playWindow(c.start - 150, c.end + 600);
+    } else if (act === "preview-sticker") {
+      const p = popItem(S.popSel);
+      if (p) playWindow(p.at_ms - 300, p.at_ms + p.duration_ms + 300);
+    }
+  });
+  box.addEventListener("input", (e) => {
+    const r = e.target.closest("[data-fx-range],[data-fx-trange]");
+    if (!r) return;
+    const v = Number(r.value);
+    if ("fxTrange" in r.dataset) { box.querySelector("#fx-trans-val").textContent = `${(v / 1000).toFixed(2).replace(".", ",")} s`; return; }
+    const label = box.querySelector(`#fx-${r.dataset.fxRange}-val`);
+    label.textContent = r.dataset.fxKey === "speed" ? `${(v / 100).toFixed(2).replace(".", ",")}×` : `${(v / 1000).toFixed(2).replace(".", ",")} s`;
+  });
+  box.addEventListener("change", async (e) => {
+    const r = e.target.closest("[data-fx-range],[data-fx-trange]");
+    if (!r) return;
+    const v = Number(r.value);
+    if ("fxTrange" in r.dataset) {
+      const cur = S.data.effects.points.find((x) => x.id === S.fxPoint)?.transition;
+      if (cur) await saveFx({ target: "transition", item: S.fxPoint, spec: { type: cur.type, ms: v } });
+      return;
+    }
+    const phase = r.dataset.fxRange;
+    const tg = fxTarget(r);
+    const base = (tg.target === "captions" ? captionSpec() : S.popSel ? stickerSpec(S.popSel) : fxRes().sticker_default)[phase];
+    const spec = { type: base.type, ms: base.ms, speed: base.speed ?? 1 };
+    if (r.dataset.fxKey === "speed") spec.speed = v / 100; else spec.ms = v;
+    await saveFx({ ...tg, phase, spec });
+  });
+}
+
+function selectPoint(id) {
+  S.fxPoint = id;
+  S.fxTab = "trans";
+  const pt = S.data.effects.points.find((x) => x.id === id);
+  if (pt) { video.pause(); seekMs(prevKept(pt.at_ms, 300)); }
+  if (S.viewer) toggleViewerPanel(true, "effects");
+  else if (S.leftTab !== "effects") { S.leftTab = "effects"; renderLeft(); }
+  else renderTextPanels();
+  renderTransitionMarks();
+}
+
+// Un po' prima di un taglio, dentro la parte tenuta.
+function prevKept(ms, back) {
+  const i = S.eff.findIndex((r) => r.end_ms >= ms);
+  const r = i >= 0 ? S.eff[i] : null;
+  return r ? Math.max(r.start_ms, ms - back) : ms - back;
+}
+
+function maybeAutoFx() {
+  const fx = S.data?.effects;
+  const sid = fx?.style;
+  if (!sid || fx.resolved.suggested || S.fxAuto[sid] || S.fxBusy) return;
+  S.fxAuto[sid] = true;
+  setTimeout(fxSuggest, 0);
+}
+
 // --- avvio ---------------------------------------------------------------------
 
 async function init() {
@@ -1565,6 +3065,13 @@ async function init() {
     apply(data);
     video.src = data.media.video_url;
     S.wave = await (await fetch(data.media.waveform_url)).json();
+    try {
+      const emo = await api("/api/emoji");
+      S.emoCats = emo.categories;
+      for (const c of emo.categories) for (const i of c.items) S.emoMap.set(emoKey(i.e), i.img);
+      $("#popup-layer").dataset.key = "";
+      renderLeft();
+    } catch { /* senza libreria: emoji col font */ }
     wireEvents();
     fitFrame();
     fitZoom();

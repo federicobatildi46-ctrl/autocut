@@ -282,8 +282,16 @@ def editor(
     ] = False,
 ) -> None:
     """Apre l'editor visivo in locale (http://127.0.0.1:<porta>)."""
-    from .editor.launch import build, serve
+    from .editor.launch import build, port_busy, serve
 
+    if port_busy(port):
+        typer.echo(
+            f"errore: la porta {port} è già occupata, probabilmente da un editor ancora acceso "
+            f"(magari una versione vecchia). Chiudilo con Ctrl+C nella sua finestra e rilancia, "
+            f"oppure usa --port {port + 1}",
+            err=True,
+        )
+        raise typer.Exit(EXIT_ERROR)
     try:
         app_, pdir = build(name, range_text=range_, log=lambda s: typer.echo(f"preparo {s}"))
     except (EditorError, MediaError, RangeError, ProjectNameError) as exc:

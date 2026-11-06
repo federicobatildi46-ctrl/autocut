@@ -3,11 +3,15 @@
 Legge timeline.json (mai modificata dall'editor) e scrive soltanto:
 - overrides.json      (scelte dell'utente, con cronologia append-only);
 - editor_state.json   (stato dell'interfaccia: quali proposte sono state riviste);
-- ai_requests.json    (coda delle richieste "Potenzia con Higgsfield", con il frame).
+- ai_requests.json    (coda delle richieste "Potenzia con Higgsfield", con il frame);
+- popups.json e text_style.json (pop-up e testo personalizzato dei sottotitoli);
+- work/images/ (foto cercate sul web o caricate, scontornate, pannello Immagini).
 """
 
 from __future__ import annotations
 
+import base64
+import itertools
 import json
 import threading
 from pathlib import Path
@@ -18,7 +22,11 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .. import effects as fx
+from .. import emoji as emo
+from .. import images as imgs
 from .. import popups as pops
+from .. import text_style as txt
 from ..brands import BrandError, BrandPack, list_brands
 from ..models.io import read_model
 from ..models.overrides import OverridesFile
@@ -90,6 +98,48 @@ class PopupGenBody(BaseModel):
     id: str
 
 
+class StickerBody(BaseModel):
+    kind: str  # emoji | text | image
+    at_ms: int
+    emoji: str | None = None
+    title: str = ""
+    image: str | None = None  # relativo a work/ (es. ai/results/x.png, images/img_0001.png)
+    cutout: bool | None = None  # foto scontornata (pannello Immagini)
+    x_pct: float = 50
+    y_pct: float = 40
+    size: str = "medium"
+    scale: float = 1.0
+    layer: str = "under_text"
+    duration_ms: int = 2000
+    sound: bool = True
+
+
+class ImageAddBody(BaseModel):
+    url: str | None = None  # immagine trovata sul web
+    thumb: str | None = None  # miniatura (se il sito blocca l'originale)
+    page: str = ""
+    title: str = ""
+    source: str = ""
+    license: str | None = None
+    data: str | None = None  # oppure caricata dal PC: data URL base64
+    redo: str | None = None  # oppure rifai un'immagine già preparata (images/img_0001.png)
+    cutout: bool = True
+    quality: str = "fast"  # fast (~2 s) | best (~20 s)
+
+
+class EffectBody(BaseModel):
+    target: str  # captions | sticker_default | sticker | transition | all_transitions
+    item: str | None = None  # id pop-up o id del punto di transizione
+    phase: str | None = None  # in | out | loop
+    spec: dict[str, Any] | None = None  # {type, ms, speed}; None = valore dello stile
+
+
+class TextBody(BaseModel):
+    scene: str | None = None  # None = tutti i sottotitoli; altrimenti id della prima parola
+    fields: dict[str, Any] = {}
+    reset: bool = False  # True = toglie le scelte (di tutti o della scena) prima di applicare
+
+
 def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -120,6 +170,10 @@ def create_app(
     *,
     agent: ClaudeAgent | None = None,
     queue: AiQueue | None = None,
+    image_search: Any = None,  # test: ricerca finta
+    image_fetch: Any = None,  # test: download finto
+    image_masker: Any = None,  # test: scontorno finto
+    image_runner: Any = None,  # test: esegue i lavori subito (default: thread)
     brands_root: Path | None = None,
     styles_root: Path | None = None,
     repo_root: Path = REPO_ROOT,
@@ -138,6 +192,8 @@ def create_app(
     tl_path = project_dir / TIMELINE_FILE
     state_path = project_dir / STATE_FILE
     ai_dir = project_dir / "work" / "ai"
+    work_dir = project_dir / "work"
+    img_dir = work_dir / imgs.IMAGES_DIR
 
     def timeline() -> Timeline:
         return read_model(tl_path, Timeline)
@@ -215,9 +271,30 @@ def create_app(
 
     portrait = cam_video.display_height >= cam_video.display_width
 
-    def look() -> dict[str, Any] | None:
+    def style_look() -> dict[str, Any] | None:
         s = current_style()
         return resolve_look(s, current_brand(), portrait=portrait) if s else None
+
+    def text_for_style() -> txt.StyleText:
+        return txt.for_style(txt.load(project_dir), state().get("style"))
+
+    def look() -> dict[str, Any] | None:
+        """Look dello stile con le scelte del pannello Testo già applicate."""
+        base = style_look()
+        return txt.apply_to_look(base, text_for_style()) if base else None
+
+    def text_payload(lk: dict[str, Any] | None) -> dict[str, Any]:
+        st = text_for_style()
+        caps = lk["captions"] if lk else None
+        return {
+            **txt.catalog_payload(state().get("style")),
+            "base": st.base.model_dump(exclude_none=True),
+            "scenes": {k: v.model_dump(exclude_none=True) for k, v in st.scenes.items()},
+            # campi look.captions che ogni scena cambia (già risolti, come nel render)
+            "resolved": {k: txt.scene_overrides(caps, v) for k, v in st.scenes.items()}
+            if caps
+            else {},
+        }
 
     def ai_context() -> str:
         parts = []
@@ -261,6 +338,18 @@ def create_app(
             pops.save(project_dir, data)
         return data
 
+    def image_url(rel: str | None) -> str | None:
+        if not rel:
+            return None
+        name = rel.rsplit("/", 1)[-1]
+        if rel.startswith("ai/results/"):
+            return "/media/ai/results/" + name
+        if rel.startswith(imgs.IMAGES_DIR + "/"):
+            f = img_dir / name
+            v = int(f.stat().st_mtime) if f.is_file() else 0
+            return f"/media/images/{name}?v={v}"  # cambia quando rifai lo scontorno
+        return None
+
     def popups_payload() -> list[dict[str, Any]]:
         reqs = {r["id"]: r for r in ai.requests()}
         sid = state().get("style")
@@ -269,14 +358,44 @@ def create_app(
             if not x.visible_for(sid):
                 continue  # proposte fatte per un altro stile
             d = x.model_dump(mode="json")
-            d["image_url"] = (
-                "/media/ai/results/" + x.image.rsplit("/", 1)[-1]
-                if x.image and x.image.startswith("ai/results/")
-                else None
-            )
+            d["image_url"] = image_url(x.image)
             d["image_status"] = (reqs.get(x.ai_request or "") or {}).get("status")
+            d["emoji_imgs"] = emo.images_for(x.emoji) if x.emoji else None
             out.append(d)
         return out
+
+    def sticker_library() -> dict[str, Any]:
+        sid = state().get("style") or "viral"
+        lib = pops.STICKERS.get(sid, pops.STICKERS["viral"])
+        results = ai_dir / "results"
+        images = (
+            sorted(
+                x.name
+                for x in results.iterdir()
+                if x.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+            )
+            if results.is_dir()
+            else []
+        )
+        return {
+            **lib,
+            "images": [
+                {"image": f"ai/results/{n}", "url": f"/media/ai/results/{n}"} for n in images
+            ],
+        }
+
+    def effect_points(tl: Timeline, eff: list) -> list[dict[str, Any]]:
+        return fx.boundaries(
+            tl, eff, video=media.proxy, offset_ms=media.offset_ms,
+            cache_path=project_dir / "work" / "scenes.json",
+        )  # fmt: skip
+
+    def effects_payload(tl: Timeline, eff: list) -> dict[str, Any]:
+        sid = state().get("style")
+        res = fx.resolved(sid, fx.for_style(fx.load(project_dir), sid))
+        points = [{**b, "transition": fx.transition_for(res, b)} for b in effect_points(tl, eff)]
+        return {"anims": fx.ANIMS, "transitions": fx.TRANSITIONS, "style": sid,
+                "resolved": res, "points": points}  # fmt: skip
 
     def edited_ms() -> int:
         tl = timeline()
@@ -421,13 +540,17 @@ def create_app(
             "ai_requests": ai.requests(),
             "brand": brand_payload(b) if (b := current_brand()) else None,
             "brands": [{"id": b.id, "name": b.name} for b in brands().values()],
-            "style": look(),
+            "style": (lk := look()),
             "styles": [
                 {"id": s.id, "name": s.name, "description": s.description}
                 for s in styles().values()
             ],
             "hook": state().get("hook"),
+            "text": text_payload(lk),
             "popups": popups_payload(),
+            "stickers": sticker_library(),
+            "images": imgs.library(work_dir),
+            "effects": effects_payload(tl, eff),
             "popup_job": {k: v for k, v in popup_job.items() if not k.startswith("failed:")},
         }
 
@@ -458,6 +581,89 @@ def create_app(
         update_state(style=body.id)
         maybe_auto_suggest()
         return JSONResponse(payload())
+
+    @app.post("/api/effects")
+    def post_effects(body: EffectBody) -> JSONResponse:
+        sid = state().get("style")
+        if sid is None:
+            raise HTTPException(400, "scegli prima uno stile (Viral o Premium) dal menu in alto")
+        data = fx.load(project_dir)
+        try:
+            if body.target == "all_transitions":
+                tl = timeline()
+                for b in effect_points(tl, effective_ranges(tl, overrides(tl))):
+                    data = fx.update(data, sid, target="transition", item=b["id"], spec=body.spec)
+            else:
+                data = fx.update(data, sid, target=body.target, item=body.item,
+                                 phase=body.phase, spec=body.spec)  # fmt: skip
+        except (fx.EffectsError, ValueError) as exc:
+            raise fail(exc) from exc
+        fx.save(project_dir, data)
+        return JSONResponse(payload())
+
+    @app.post("/api/effects/suggest")
+    def effects_suggest() -> JSONResponse:
+        """Claude compone gli effetti dello stile: testo, sticker e transizioni."""
+        s = current_style()
+        if s is None:
+            raise HTTPException(400, "scegli prima uno stile (Viral o Premium) dal menu in alto")
+        tl = timeline()
+        points = effect_points(tl, effective_ranges(tl, overrides(tl)))
+        items = [p for p in popups_payload() if p["status"] != "rejected"]
+        prompt = fx.suggest_prompt(s.id, s.name, word_rows(tl), points, items)
+        try:
+            ops = ai.agent.ask_json(prompt)
+        except AgentError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        data, note = fx.apply_suggestion(
+            fx.load(project_dir), s.id, ops if isinstance(ops, dict) else {},
+            sticker_ids={p["id"] for p in items}, point_ids={b["id"] for b in points},
+        )  # fmt: skip
+        fx.save(project_dir, data)
+        out = payload()
+        out["message"] = note or "Effetti scelti da Claude"
+        return JSONResponse(out)
+
+    @app.get("/anim.js")
+    def anim_js() -> FileResponse:
+        """Motore delle animazioni, lo stesso file usato dal render Remotion."""
+        return FileResponse(repo_root / "motion" / "src" / "anim.js", media_type="text/javascript")
+
+    @app.post("/api/text")
+    def post_text(body: TextBody) -> JSONResponse:
+        if current_style() is None:
+            raise HTTPException(400, "scegli prima uno stile (Viral o Premium) dal menu in alto")
+        try:
+            data = txt.update(
+                txt.load(project_dir),
+                state().get("style"),
+                scene=body.scene,
+                fields=body.fields,
+                reset=body.reset,
+                allowed=txt.allowed_fonts(style_look()),
+            )
+        except (txt.TextStyleError, ValueError) as exc:
+            raise fail(exc) from exc
+        txt.save(project_dir, data)
+        return JSONResponse(payload())
+
+    @app.get("/api/emoji")
+    def emoji_set() -> JSONResponse:
+        """Tastiera emoji (immagini stile iPhone in library/emoji, se presenti)."""
+        idx = emo.index(emo.EMOJI_DIR)
+        cats = [
+            {"name": c["name"], "items": [{"e": i["e"], "img": i["img"]} for i in c["items"]]}
+            for c in idx["categories"]
+        ]
+        return JSONResponse({"available": bool(cats), "categories": cats})
+
+    @app.get("/media/emoji/{name}")
+    def emoji_png(name: str) -> FileResponse:
+        path = emo.EMOJI_DIR / "apple" / name
+        if not emo.NAME_RE.match(name) or not path.is_file():
+            raise HTTPException(404, "emoji non trovata")
+        cache = {"Cache-Control": "max-age=86400"}
+        return FileResponse(path, media_type="image/png", headers=cache)
 
     @app.get("/media/ref/{brand_id}/{index}")
     def brand_ref(brand_id: str, index: int) -> FileResponse:
@@ -576,6 +782,28 @@ def create_app(
         pops.save(project_dir, new)
         return JSONResponse(payload())
 
+    @app.post("/api/popups/add")
+    def popups_add(body: StickerBody) -> JSONResponse:
+        """Sticker aggiunto a mano dal pannello Sticker: approvato, posizione libera."""
+        if body.image is not None:
+            path = (work_dir / body.image).resolve()
+            if not path.is_relative_to(work_dir.resolve()) or not path.is_file():
+                raise HTTPException(404, f"immagine {body.image} non trovata nel progetto")
+        add = {
+            **body.model_dump(exclude_none=True),
+            "placement": "free",
+            "status": "approved",
+            "style": state().get("style"),
+        }
+        try:
+            new, log = pops.apply_ops(popups_file(), {"add": [add]}, "user")
+        except pops.PopupError as exc:
+            raise fail(exc) from exc
+        pops.save(project_dir, new)
+        out = payload()
+        out["added"] = log[-1].split()[-1] if log else None
+        return JSONResponse(out)
+
     @app.post("/api/popups/generate")
     def popups_generate(body: PopupGenBody) -> JSONResponse:
         """Genera con Higgsfield l'immagine di un pop-up (solo su richiesta: costa crediti)."""
@@ -591,6 +819,108 @@ def create_app(
         )
         pops.save(project_dir, new)
         return JSONResponse(payload())
+
+    # --- immagini: cerca sul web, scarica, scontorna (solo su richiesta dell'utente) -----
+
+    img_jobs: dict[str, dict[str, Any]] = {}
+    img_ids = itertools.count(1)
+    img_lock = threading.Lock()
+    search_fn = image_search or imgs.search
+    fetch_fn = image_fetch or imgs.fetch
+    masker = image_masker or imgs.mask_for
+
+    def run_image_job(job_id: str, body: ImageAddBody) -> None:
+        job = img_jobs[job_id]
+        name = None
+
+        def progress(phase: str, frac: float | None) -> None:
+            job.update(phase=phase, progress=frac)
+
+        try:
+            if body.redo:
+                name = body.redo.rsplit("/", 1)[-1]
+                raw = imgs.original(img_dir / name)
+                info = imgs.prepare(
+                    raw, img_dir / name, cutout=body.cutout, quality=body.quality,
+                    progress=progress, masker=masker,
+                )  # fmt: skip
+                meta = imgs.library(work_dir)
+                old = next((m for m in meta if m["image"] == body.redo), {})
+                keep = {k: old.get(k) for k in ("title", "source", "page", "license")}
+                imgs.remember(img_dir, name, {**keep, "cutout": info["cutout"],
+                                               "quality": info["quality"]})  # fmt: skip
+                job.update(status="done", phase="done", image=body.redo, **info)
+                return
+            if body.data:
+                job.update(phase="reading")
+                raw = base64.b64decode(body.data.split(",", 1)[-1])
+                if len(raw) > imgs.MAX_BYTES:
+                    raise imgs.ImageError("immagine troppo pesante (oltre 25 MB)")
+            else:
+                job.update(phase="downloading")
+                raw = fetch_fn(body.url or "", referer=body.page, fallback=body.thumb)
+            with img_lock:
+                name = imgs.next_name(img_dir)
+                img_dir.mkdir(parents=True, exist_ok=True)
+                (img_dir / name).write_bytes(b"")  # prenota il nome
+            info = imgs.prepare(
+                raw, img_dir / name, cutout=body.cutout, quality=body.quality,
+                progress=progress, masker=masker,
+            )  # fmt: skip
+            imgs.remember(img_dir, name, {
+                "title": body.title[:120], "source": body.source, "page": body.page,
+                "license": body.license, "cutout": info["cutout"], "quality": info["quality"],
+            })  # fmt: skip
+            job.update(
+                status="done", phase="done", image=f"{imgs.IMAGES_DIR}/{name}",
+                url=f"/media/images/{name}", **info,
+            )  # fmt: skip
+        except Exception as exc:  # qualsiasi errore va mostrato nel pannello
+            if name and (img_dir / name).is_file() and (img_dir / name).stat().st_size == 0:
+                (img_dir / name).unlink(missing_ok=True)
+            job.update(status="error", error=str(exc) or exc.__class__.__name__)
+
+    @app.get("/api/images/search")
+    def images_search(q: str, transparent: bool = False, free: bool = False) -> JSONResponse:
+        if not q.strip():
+            raise HTTPException(400, "scrivi cosa cercare")
+        try:
+            results = search_fn(q, transparent=transparent, free=free)
+        except imgs.ImageError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return JSONResponse({"query": imgs.clean_query(q), "results": results})
+
+    @app.post("/api/images/add")
+    def images_add(body: ImageAddBody) -> JSONResponse:
+        """Scarica (o legge dal PC) e scontorna: lavoro in background, il pannello lo segue."""
+        if not body.data and not body.url and not body.redo:
+            raise HTTPException(400, "manca l'immagine")
+        if body.quality not in imgs.QUALITIES:
+            raise HTTPException(400, f"qualità {body.quality!r} sconosciuta")
+        if body.redo and not (img_dir / body.redo.rsplit("/", 1)[-1]).is_file():
+            raise HTTPException(404, f"immagine {body.redo} non trovata")
+        job_id = f"img{next(img_ids)}"
+        img_jobs[job_id] = {"id": job_id, "status": "running", "phase": "queued", "progress": None}
+        if image_runner:
+            image_runner(run_image_job, job_id, body)
+        else:
+            threading.Thread(target=run_image_job, args=(job_id, body), daemon=True).start()
+        return JSONResponse(img_jobs[job_id])
+
+    @app.get("/api/images/job/{job_id}")
+    def images_job(job_id: str) -> JSONResponse:
+        job = img_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "lavoro non trovato")
+        return JSONResponse(job)
+
+    @app.get("/media/images/{name}")
+    def image_file(name: str) -> FileResponse:
+        base = img_dir.resolve()
+        path = (base / name).resolve()
+        if path.parent != base or not path.is_file() or path.suffix != ".png":
+            raise HTTPException(404)
+        return FileResponse(path, media_type="image/png")
 
     @app.post("/api/ai-requests")
     def post_ai(body: AiBody) -> JSONResponse:

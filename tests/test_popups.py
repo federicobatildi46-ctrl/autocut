@@ -279,3 +279,105 @@ def test_style_choice_triggers_one_automatic_proposal(tmp_path, monkeypatch):
     p = c.post("/api/style", json={"id": "premium"}).json()
     # nuova proposta per il premium; quella viral non compare qui
     assert len(calls) == 2 and [x["style"] for x in p["popups"]] == ["premium"]
+
+
+# --- pannello Sticker ------------------------------------------------------------------
+
+
+def test_free_stickers_need_a_position_and_know_their_layer():
+    with pytest.raises(ValueError, match="posizione"):
+        pops.Popup(id="pop_0001", at_ms=0, kind="emoji", emoji="🔥", placement="free")
+    p = pops.Popup(id="pop_0001", at_ms=0, kind="emoji", emoji="🔥", placement="free",
+                   x_pct=70, y_pct=60, scale=1.6, rotation=20, layer="over_text")  # fmt: skip
+    assert not p.behind_person
+    assert pops.Popup(
+        id="pop_0002", at_ms=0, kind="text", title="60s", placement="behind"
+    ).behind_person
+    with pytest.raises(ValueError):
+        pops.Popup(id="pop_0003", at_ms=0, kind="emoji", emoji="🔥", placement="free",
+                   x_pct=50, y_pct=50, scale=9)  # fmt: skip
+    for lib in pops.STICKERS.values():
+        assert len(lib["emoji"]) >= 8 and len(lib["text"]) >= 6
+
+
+def test_render_keeps_free_stickers_together_with_their_layer(tmp_path):
+    from autocut.render.preview import Piece
+
+    pops.save(
+        tmp_path,
+        pops.PopupsFile(
+            seeded=True,
+            items=[
+                pops.Popup(id="pop_0001", at_ms=1000, kind="emoji", emoji="🌴"),
+                pops.Popup(id="pop_0002", at_ms=1500, kind="emoji", emoji="🔥", placement="free",
+                           x_pct=70, y_pct=60, rotation=20, scale=1.6, layer="over_text"),
+                pops.Popup(id="pop_0003", at_ms=1800, kind="text", title="WOW", placement="free",
+                           x_pct=30, y_pct=20, layer="person"),
+            ],
+        ),
+    )  # fmt: skip
+    look = resolve_look(load_style(STYLES_DIR / "viral" / "style.json"), None, portrait=True)
+    cards = {c["id"]: c for c in _cards(tmp_path, [Piece(0, 9000, 0)], [], look)}
+    # gli sticker messi a mano non tagliano gli altri: restano tutti a schermo
+    assert cards["pop_0001"]["to_ms"] == 1000 + 2200
+    assert cards["pop_0002"]["layer"] == "over_text" and cards["pop_0002"]["rotation"] == 20
+    assert (cards["pop_0002"]["x_pct"], cards["pop_0002"]["scale"]) == (70, 1.6)
+    assert cards["pop_0003"]["layer"] == "person"
+
+
+def test_sticker_api_adds_moves_and_layers(client):  # noqa: F811
+    c, pdir = client
+    c.post("/api/style", json={"id": "viral"})
+    p = c.get("/api/project").json()
+    assert "🔥" in p["stickers"]["emoji"] and p["stickers"]["images"] == []
+    p = c.post("/api/popups/add", json={"kind": "emoji", "emoji": "🔥", "at_ms": 1200}).json()
+    new = next(x for x in p["popups"] if x["id"] == p["added"])
+    assert (new["placement"], new["status"], new["style"], new["x_pct"]) == (
+        "free",
+        "approved",
+        "viral",
+        50,
+    )
+    move = {"x_pct": 80, "y_pct": 20, "rotation": -15, "scale": 2, "layer": "over_text"}
+    body = {"id": new["id"], "action": "update", "fields": move}
+    p = c.post("/api/popups/item", json=body).json()
+    moved = next(x for x in p["popups"] if x["id"] == new["id"])
+    assert (moved["x_pct"], moved["rotation"], moved["layer"]) == (80, -15, "over_text")
+    assert c.post("/api/popups/add", json={"kind": "image", "image": "ai/results/nope.png",
+                                           "at_ms": 0}).status_code == 404  # fmt: skip
+    c.post("/api/style", json={"id": "premium"})
+    p = c.get("/api/project").json()
+    assert all(x["id"] != new["id"] for x in p["popups"])  # lo sticker vale solo per il viral
+    assert "📈" in p["stickers"]["emoji"]
+
+
+def test_emoji_images_split_sequences(tmp_path):
+    from autocut import emoji as emo
+
+    root = tmp_path / "emoji"
+    (root / "apple").mkdir(parents=True)
+    items = [
+        {"e": "🔥", "img": "1f525.png"},
+        {"e": "🇮🇹", "img": "1f1ee-1f1f9.png"},
+        {"e": "❤️", "img": "2764-fe0f.png"},
+        {"e": "🤷‍♂️", "img": "1f937-200d-2642-fe0f.png"},
+    ]
+    (root / "index.json").write_text(
+        json.dumps({"categories": [{"name": "Smileys & Emotion", "items": items}]}),
+        encoding="utf-8",
+    )
+    assert emo.images_for("🇮🇹🔥", root) == ["1f1ee-1f1f9.png", "1f525.png"]
+    assert emo.images_for("❤", root) == ["2764-fe0f.png"]  # con o senza variation selector
+    assert emo.images_for("🤷‍♂️", root) == ["1f937-200d-2642-fe0f.png"]
+    assert emo.images_for("🔥 ciao", root) is None  # testo: resta al font
+    assert emo.NAME_RE.match("1f1ee-1f1f9.png") and not emo.NAME_RE.match("../x.png")
+
+
+def test_emoji_api_without_library(client, monkeypatch, tmp_path):  # noqa: F811
+    from autocut import emoji as emo
+
+    c, _ = client
+    monkeypatch.setattr(emo, "EMOJI_DIR", tmp_path / "nessuna")
+    assert c.get("/api/emoji").json() == {"available": False, "categories": []}
+    assert c.get("/media/emoji/1f525.png").status_code == 404
+    assert c.get("/media/emoji/..%2Fsecret.png").status_code == 404

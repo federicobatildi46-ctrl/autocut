@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import effects, text_style
 from ..brands import list_brands
 from ..ingest.fingerprint import fingerprint
 from ..models.io import read_model
@@ -77,6 +78,8 @@ def run_style_preview(
     style = styles[sid]
     v = tl.sources.camera.video
     look = resolve_look(style, brand, portrait=v.display_height >= v.display_width)
+    text = text_style.for_style(text_style.load(pdir), sid)  # scelte del pannello Testo
+    look = text_style.apply_to_look(look, text)
 
     cam = tl.sources.camera
     src = Path(cam.path_hint) if cam.path_hint else None
@@ -92,6 +95,13 @@ def run_style_preview(
     eff = effective_ranges(tl, ov)
 
     work = pdir / "work"
+    # effetti del pannello Effetti e punti di transizione (tagli / cambi di scena)
+    fx_res = effects.resolved(sid, effects.for_style(effects.load(pdir), sid))
+    proxy = next(iter(sorted(work.glob("proxy-*.mp4"))), None)
+    rng = tl.run.range
+    fx_points = effects.boundaries(
+        tl, eff, video=proxy, offset_ms=rng.start_ms if rng else 0, cache_path=work / "scenes.json"
+    )
     gain = voice_gain_db(work, tl, src, look["sound"]["voice_lufs"])
     span = f"{start / 1000:.1f}-{end / 1000:.1f} s"
     log(f"estratto {span} dal raw (solo lettura), voce {gain:+.1f} dB...")
@@ -105,9 +115,12 @@ def run_style_preview(
         source_rel=source.relative_to(work).as_posix(),
         hook_text=hook if hook is not None else state.get("hook"),
         loudness=sfx_loudness,
+        scenes=text.scenes,
+        effects=fx_res,
+        points=fx_points,
     )
     stage_sounds(props["sounds"], work)
-    if any(c.get("placement") == "behind" for c in props["cards"]):
+    if any(c.get("layer") == "person" for c in props["cards"]):
         log("sagoma della persona per le grafiche dietro (MediaPipe, in locale)...")
         masks, count = ensure_masks(source)
         props["video"]["masks"] = {"dir": masks.relative_to(work).as_posix(), "count": count}

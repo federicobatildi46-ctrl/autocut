@@ -28,9 +28,12 @@ Status = Literal["proposed", "approved", "rejected"]
 Origin = Literal["auto", "ai", "user"]
 # Dove compare (dai reference): accanto al sottotitolo, sopra il testo, una coppia ai due lati,
 # grande al centro sotto il testo, in alto sopra la testa, DIETRO la persona (solo premium).
-Placement = Literal["side", "above", "pair", "center", "top", "behind"]
+# "free" = messo a mano nel pannello Sticker: centro in x_pct/y_pct (% del fotogramma).
+Placement = Literal["side", "above", "pair", "center", "top", "behind", "free"]
 Size = Literal["small", "medium", "large"]
-PLACEMENTS = ("side", "above", "pair", "center", "top", "behind")
+PLACEMENTS = ("side", "above", "pair", "center", "top", "behind", "free")
+# Livello: dietro ai sottotitoli, davanti ai sottotitoli, o dietro la persona (sagoma).
+Layer = Literal["under_text", "over_text", "person"]
 
 
 class Popup(BaseModel):
@@ -43,6 +46,7 @@ class Popup(BaseModel):
     title: str = Field(default="", max_length=40)  # etichetta breve (anche vuota)
     emoji: str | None = Field(default=None, max_length=16)
     image: str | None = None  # percorso relativo a work/ (es. ai/results/ai_0001-1.png)
+    cutout: bool = False  # foto scontornata (pannello Immagini): senza cornice né sfondo
     image_prompt: str | None = Field(default=None, max_length=1200)  # da generare con Higgsfield
     ai_request: str | None = None  # id della richiesta Higgsfield che genera l'immagine
     sound: bool = True
@@ -53,6 +57,11 @@ class Popup(BaseModel):
     size: Size = "medium"
     side: Literal["left", "right"] = "left"
     style: str | None = None  # stile per cui è stato proposto (None = vale per tutti)
+    x_pct: float | None = Field(default=None, ge=0, le=100)  # centro, solo con placement "free"
+    y_pct: float | None = Field(default=None, ge=0, le=100)
+    scale: float = Field(default=1.0, ge=0.2, le=5.0)  # rispetto alla grandezza di `size`
+    rotation: float = Field(default=0.0, ge=-180, le=180)
+    layer: Layer = "under_text"
     updated_at: str = ""
 
     @model_validator(mode="after")
@@ -65,7 +74,13 @@ class Popup(BaseModel):
             raise ValueError("un pop-up immagine ha bisogno di un'immagine o di un prompt")
         if self.placement == "pair" and self.kind != "emoji":
             raise ValueError("la coppia ai lati vuole due emoji (kind emoji)")
+        if self.placement == "free" and (self.x_pct is None or self.y_pct is None):
+            raise ValueError("uno sticker libero ha bisogno della posizione (x_pct, y_pct)")
         return self
+
+    @property
+    def behind_person(self) -> bool:
+        return self.placement == "behind" or self.layer == "person"
 
     def visible_for(self, style_id: str | None) -> bool:
         return self.style is None or self.style == style_id
@@ -163,6 +178,21 @@ def seed_from_ai_requests(
 EDITABLE = {
     "at_ms", "duration_ms", "kind", "title", "emoji", "image", "image_prompt", "sound", "status",
     "reason", "ai_request", "placement", "size", "side", "style",
+    "x_pct", "y_pct", "scale", "rotation", "layer", "cutout",
+}  # fmt: skip
+
+# Libreria del pannello Sticker, per stile (le immagini AI del progetto si aggiungono a parte).
+STICKERS: dict[str, dict[str, list[str]]] = {
+    "viral": {
+        # le più usate della tastiera del telefono (WhatsApp / CapCut)
+        "emoji": ["😂", "❤️", "😍", "🔥", "😭", "🙏", "😱", "🤯", "😎", "🥳", "🤔", "😅", "👏",
+                  "💪", "👀", "💯", "✅", "❌", "👇", "💰", "💸", "🤑", "🚀", "🏆", "🇮🇹"],
+        "text": ["WOW", "BOOM", "TOP", "NO!", "SÌ!", "+100%", "GRATIS", "ATTENZIONE"],
+    },
+    "premium": {
+        "emoji": ["📈", "💼", "🏆", "✨", "🎯", "🔑", "📊", "💎", "🌍", "⏱️"],
+        "text": ["60s", "+40%", "2026", "TOP 1%", "€10K", "x10", "100%", "#1"],
+    },
 }  # fmt: skip
 
 
