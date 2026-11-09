@@ -57,6 +57,12 @@ const S = {
   stTab: "add", // pannello Sticker: add | edit | list (le schede non spostano la libreria)
   emoMap: new Map(), // emoji -> PNG stile iPhone (library/emoji)
   fxTab: "text", // pannello Effetti: text | stickers | trans
+  coverArm: null, // formato in attesa di conferma (Genera costa crediti)
+  coverThinking: false,
+  hfLogin: false,
+  sndSel: null, // suono selezionato (pannello Audio / traccia audio)
+  sndDrag: null,
+  piece: null, // pezzo selezionato nella traccia video (tagli a mano)
   imgQ: "", // pannello Immagini: richiesta, risultati, opzioni, lavori in corso
   imgRes: null,
   imgShown: "",
@@ -171,6 +177,7 @@ function keptTotal() {
 }
 
 function togglePlay() {
+  ensureAudio();
   if (video.paused) {
     S.stopAt = null;
     if (nowMs() >= S.axisEnd - 30) seekMs(S.axisStart);
@@ -208,6 +215,8 @@ function tick() {
   updatePopups(cur);
   updateCaptionFx(cur);
   updatePopupFx(cur);
+  updateSounds(cur);
+  updateVfxOverlay(cur);
   if (S.viewer) updateViewer(cur);
   updateCapSel();
   requestAnimationFrame(tick);
@@ -341,6 +350,8 @@ function wireViewer() {
   $("#v-sticker").addEventListener("click", () => side("stickers"));
   $("#v-effects").addEventListener("click", () => side("effects"));
   $("#v-images").addEventListener("click", () => side("images"));
+  $("#v-audio").addEventListener("click", () => side("audio"));
+  $("#v-vfx").addEventListener("click", () => side("vfx"));
   video.addEventListener("play", () => $("#v-play").classList.add("playing"));
   video.addEventListener("pause", () => $("#v-play").classList.remove("playing"));
   // Esc in schermo intero lo chiude il browser: chiudiamo anche il livello
@@ -703,6 +714,10 @@ function apply(data) {
   $("#player-name").textContent = S.tl.sources.camera.file_name;
   $("#btn-undo-top").disabled = !data.summary.can_undo;
   $("#tl-undo").disabled = !data.summary.can_undo;
+  $("#btn-redo-top").disabled = !data.summary.can_redo;
+  $("#tl-redo").disabled = !data.summary.can_redo;
+  if (S.sndSel && !soundItem(S.sndSel)) S.sndSel = null;
+  applyVoiceGain();
   const todo = S.decisions.filter((d) => !d.reviewed).length;
   $("#ai-count").textContent = todo ? String(todo) : "";
   const popTodo = (data.popups ?? []).filter((p) => p.status === "proposed").length;
@@ -711,17 +726,22 @@ function apply(data) {
   renderStats();
   renderRanges();
   renderTextTrack();
+  renderAudioTrack();
+  renderVfxTrack();
   renderLeft();
   const typing = ["boost-prompt", "pop-prompt"].includes(document.activeElement?.id);
   if (!typing) renderRight();
   updateToggle();
+  renderExport();
   managePolling();
 }
 
 // Finché una richiesta AI è in lavorazione, aggiorna lo stato ogni 4 s.
 function managePolling() {
   const running = (S.data?.ai_requests ?? []).some((r) => r.status === "running")
-    || S.data?.popup_job?.status === "running";
+    || S.data?.popup_job?.status === "running" || S.data?.covers?.job?.status === "running"
+    || S.data?.export?.job?.status === "running"
+    || (S.data?.vfx?.shots ?? []).some((s) => s.status === "running");
   if (running && !S.pollTimer) {
     S.pollTimer = setInterval(async () => {
       try { apply(await api("/api/project")); } catch { /* riprova al prossimo giro */ }
@@ -760,6 +780,8 @@ function renderTimeline() {
   renderFilmstrip();
   renderWave();
   renderRanges();
+  renderAudioTrack();
+  renderVfxTrack();
   updatePlayhead(nowMs());
 }
 
@@ -784,8 +806,11 @@ function renderTextTrack() {
     const left = xOf(c.start);
     const width = Math.max(4, xOf(c.end) - left - 1);
     const mid = (c.start + c.end) / 2;
-    const cls = ["chunk", c.event ? "event" : "", isCut(mid) ? "cut" : "", i === S.lastChunk ? "now" : ""].join(" ");
-    return `<div class="${cls}" data-i="${i}" style="left:${left}px;width:${width}px" title="${esc(c.text)}">${width > 22 ? esc(c.text) : ""}</div>`;
+    const own = Boolean(S.data?.text?.scenes?.[c.id]);
+    const open = S.leftTab === "text" && S.txScope === "scene" && i === S.txChunk;
+    const cls = ["chunk", c.event ? "event" : "", isCut(mid) ? "cut" : "", i === S.lastChunk ? "now" : "", open ? "sel" : "", own ? "own" : ""].join(" ");
+    const text = chunkText(c);
+    return `<div class="${cls}" data-i="${i}" style="left:${left}px;width:${width}px" title="${esc(text)} · clic per modificarlo">${width > 22 ? esc(text) : ""}</div>`;
   });
   $("#track-text").innerHTML = parts.join("");
 }
@@ -846,25 +871,30 @@ function decisionForRange(r) {
 function renderRanges() {
   if (!S.data) return;
   const file = S.tl.sources.camera.file_name;
-  const parts = S.eff.map((r, i) => {
-    const left = xOf(r.start_ms);
-    const width = Math.max(2, xOf(r.end_ms) - left);
-    const dur = r.end_ms - r.start_ms;
+  const sel = pieceKey(S.piece);
+  const parts = visiblePieces().map(({ i, start, end, keep, r }) => {
+    const left = xOf(start);
+    const width = Math.max(2, xOf(end) - left);
+    const dur = end - start;
     const dec = decisionForRange(r);
-    const sel = dec && dec === S.selected ? " sel" : "";
-    if (r.state === "keep") {
+    const key = `${start}-${end}`;
+    const on = (dec && dec === S.selected) || key === sel ? " sel" : "";
+    const data = `data-r="${i}" data-dec="${dec ?? ""}" data-piece="${key}"`;
+    if (keep) {
       const restored = r.origin === "override";
       const cls = restored ? "rng restored" : "rng keep";
       const lbl = restored
         ? (width > 50 ? `<span class="lbl">↺ tenuta</span>` : "")
         : (width > 70 ? `<span class="lbl">${esc(file)} · ${clock(dur)}</span>` : "");
-      return `<div class="${cls}${sel}" data-r="${i}" data-dec="${dec ?? ""}" style="left:${left}px;width:${width}px">${lbl}</div>`;
+      return `<div class="${cls}${on}" ${data} style="left:${left}px;width:${width}px">${lbl}</div>`;
     }
-    const extra = r.origin === "override" ? " override" : r.origin === "take" ? " take" : "";
+    const extra = r.origin === "override" ? " override" : r.origin === "take" ? " take" : r.origin === "manual" ? " manual" : "";
     const lbl = width > 40 ? `<span class="lbl">✂ ${(dur / 1000).toFixed(1)}s</span>` : "";
-    return `<div class="rng remove${extra}${sel}" data-r="${i}" data-dec="${dec ?? ""}" style="left:${left}px;width:${width}px" title="Parte tolta: ${secs(dur)}">${lbl}</div>`;
+    return `<div class="rng remove${extra}${on}" ${data} data-manual="${r.origin === "manual" ? 1 : ""}" style="left:${left}px;width:${width}px" title="${r.origin === "manual" ? "Tolto da te: clic e Ripristina per rimetterlo" : "Parte tolta"}: ${secs(dur)}">${lbl}</div>`;
   });
-  $("#ranges").innerHTML = parts.join("");
+  const marks = (S.data.cuts?.splits ?? []).map((ms) =>
+    `<button class="split-mark" data-split="${ms}" style="left:${xOf(ms)}px" title="Divisione a ${showTime(ms)}: clic per toglierla"></button>`);
+  $("#ranges").innerHTML = parts.join("") + marks.join("");
   renderTransitionMarks();
 }
 
@@ -920,6 +950,7 @@ function fitZoom() {
 
 function select(id, { seek = true, scrollCard = true } = {}) {
   S.selected = id;
+  S.piece = null;
   const d = S.decisions.find((x) => x.id === id);
   if (d && seek) seekMs(d.start_ms);
   renderRanges();
@@ -932,14 +963,16 @@ function select(id, { seek = true, scrollCard = true } = {}) {
 function updateToggle() {
   const btn = $("#tl-toggle");
   const d = S.decisions.find((x) => x.id === S.selected);
-  btn.disabled = !d;
-  $("#tl-toggle-label").textContent = !d ? "Togli / Ripristina" : d.effective === "remove" ? "Ripristina" : "Togli";
+  btn.disabled = !d && !S.piece;
+  $("#tl-toggle-label").textContent = S.piece ? (S.piece.manual ? "Ripristina" : "Togli")
+    : !d ? "Togli / Ripristina" : d.effective === "remove" ? "Ripristina" : "Togli";
 }
 
 const flip = (id) => mutate("/api/decision", { id, action: "flip" });
 const accept = (id) => mutate("/api/decision", { id, action: "accept" }, "Proposta approvata");
 const reset = (id) => mutate("/api/decision", { id, action: "reset" }, "Tornato alla proposta");
-const undo = () => mutate("/api/undo", {}, "Annullato");
+const undo = () => mutate("/api/history/undo", {}, "Annullato");
+const redo = () => mutate("/api/history/redo", {}, "Ripetuto");
 
 function gapWords(id) {
   const m = /^gap:(.+?)-(.+)$/.exec(id);
@@ -1378,6 +1411,7 @@ const TOOL_TABS = [
   ["effects", "Effetti", `<svg viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg>`],
   ["transitions", "Transizioni", `<svg viewBox="0 0 24 24"><path d="M4 4h7v16H4zM13 4l7 8-7 8"/></svg>`],
   ["subs", "Sottotitoli", `<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 13h4M13 13h4M7 16h10"/></svg>`],
+  ["vfx", "Genera AI", `<svg viewBox="0 0 24 24"><path d="m12 3 1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>`],
   ["filters", "Filtri", `<svg viewBox="0 0 24 24"><circle cx="9" cy="10" r="5"/><circle cx="15" cy="10" r="5"/><circle cx="12" cy="15" r="5"/></svg>`],
 ];
 
@@ -1392,7 +1426,7 @@ function renderLeft() {
   if (S.leftTab === "media") box.innerHTML = renderMedia();
   else if (S.leftTab === "brand") box.innerHTML = renderBrandPanel();
   else if (S.leftTab === "subs") box.innerHTML = renderTranscript();
-  else if (["text", "stickers", "images", "effects"].includes(S.leftTab)) renderTextPanels();
+  else if (["text", "stickers", "images", "effects", "audio", "transitions", "filters", "vfx"].includes(S.leftTab)) renderTextPanels();
   else {
     const label = TOOL_TABS.find((t) => t[0] === S.leftTab)?.[1] ?? "";
     box.innerHTML = `<div class="placeholder">${TOOL_TABS.find((t) => t[0] === S.leftTab)?.[2] ?? ""}
@@ -1567,6 +1601,18 @@ function wireEvents() {
   wireEffectsPanel($("#viewer-panel"));
   wireImagesPanel($("#left-content"));
   wireImagesPanel($("#viewer-panel"));
+  wireVfxPanel($("#left-content"));
+  wireVfxPanel($("#viewer-panel"));
+  $("#track-vfx").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-vfxblk]");
+    if (b) openVfx(b.dataset.vfxblk);
+  });
+  wireExport();
+  wireFiltersPanel($("#left-content"));
+  wireAudioPanel($("#left-content"));
+  wireAudioPanel($("#viewer-panel"));
+  video.addEventListener("play", ensureAudio);
+  video.addEventListener("pause", stopSounds);
   $("#tl-content").addEventListener("mousedown", (e) => {
     const m = e.target.closest("[data-fx-point]");
     if (m) { e.stopPropagation(); selectPoint(m.dataset.fxPoint); }
@@ -1579,7 +1625,10 @@ function wireEvents() {
   });
   $("#btn-undo-top").addEventListener("click", undo);
   $("#tl-undo").addEventListener("click", undo);
-  $("#tl-toggle").addEventListener("click", () => S.selected && flip(S.selected));
+  $("#tl-redo").addEventListener("click", redo);
+  $("#btn-redo-top").addEventListener("click", redo);
+  $("#tl-split").addEventListener("click", splitHere);
+  $("#tl-toggle").addEventListener("click", () => { if (S.piece) togglePiece(); else if (S.selected) flip(S.selected); });
 
   $("#zoom").addEventListener("input", setZoomFromSlider);
   $("#zoom-in").addEventListener("click", () => zoomTo(S.pps * 1.5));
@@ -1606,20 +1655,48 @@ function wireEvents() {
   const content = $("#tl-content");
   content.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
-    const rng = e.target.closest(".rng[data-dec]");
+    const snd = e.target.closest("[data-snd]");
+    if (snd) {
+      e.preventDefault();
+      S.sndDrag = { id: snd.dataset.snd, x0: e.clientX, dx: 0 };
+      selectSound(snd.dataset.snd);
+      return;
+    }
+    const mark = e.target.closest("[data-split]");
+    if (mark) { mutate("/api/cuts", { action: "unsplit", ms: Number(mark.dataset.split) }, "Divisione tolta"); return; }
+    const rng = e.target.closest(".rng");
     const chunk = e.target.closest(".chunk");
     if (rng && rng.dataset.dec) {
       select(rng.dataset.dec, { seek: false });
+    } else if (rng && rng.dataset.piece) {
+      const [a, b] = rng.dataset.piece.split("-").map(Number);
+      selectPiece(a, b, rng.dataset.manual === "1");
     } else if (chunk) {
-      const c = S.chunks[Number(chunk.dataset.i)];
-      seekMs(c.start);
+      openCaptionEditor(Number(chunk.dataset.i));
       return;
     }
     S.dragging = true;
     seekFromEvent(e);
   });
-  window.addEventListener("mousemove", (e) => { if (S.dragging) seekFromEvent(e); });
-  window.addEventListener("mouseup", () => (S.dragging = false));
+  window.addEventListener("mousemove", (e) => {
+    if (S.sndDrag) {
+      const d = S.sndDrag;
+      d.dx = e.clientX - d.x0;
+      // il blocco può essere stato ridisegnato (selezione): lo si ritrova per id
+      const el = document.querySelector(`#track-audio [data-snd="${CSS.escape(d.id)}"]`);
+      if (el) el.style.translate = `${d.dx}px 0`;
+      return;
+    }
+    if (S.dragging) seekFromEvent(e);
+  });
+  window.addEventListener("mouseup", () => {
+    S.dragging = false;
+    const d = S.sndDrag;
+    S.sndDrag = null;
+    if (d && Math.abs(d.dx) > 3) {
+      saveAudio({ target: "sound", item: d.id, fields: { shift_ms: Math.round((d.dx / S.pps) * 1000) } }, "Suono spostato");
+    }
+  });
 
   $("#right-tabs").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-rtab]");
@@ -1762,7 +1839,19 @@ async function sendAi(prompt, kind, timeMs) {
 }
 
 function onKey(e) {
-  if (e.target.closest("input, textarea, select")) return;
+  if (e.target.closest?.("input, textarea, select")) return;
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
+  if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); return; }
+  if (mod && e.key.toLowerCase() === "b") { e.preventDefault(); splitHere(); return; }
+  if (e.key === "Escape" && (S.sndSel || S.piece)) { e.preventDefault(); S.sndSel = null; S.piece = null; renderAudioTrack(); renderRanges(); updateToggle(); renderTextPanels(); return; }
+  if (S.sndSel && (e.key === "Delete" || e.key === "Backspace")) {
+    e.preventDefault();
+    const s = soundItem(S.sndSel);
+    if (s) saveAudio(s.origin === "user" ? { target: "remove", item: s.id } : { target: "sound", item: s.id, fields: { muted: !s.own_muted } }, s.origin === "user" ? "Suono eliminato" : s.own_muted ? "Suono riattivato" : "Suono muto");
+    return;
+  }
+  if (S.piece && (e.key === "Delete" || e.key === "Backspace")) { e.preventDefault(); togglePiece(); return; }
   if (e.key === "Escape" && (S.txSel || S.popSel)) { e.preventDefault(); S.txSel = false; S.popSel = null; renderTextPanels(); return; }
   if (S.popSel && (e.key === "Delete" || e.key === "Backspace")) { e.preventDefault(); deletePop(S.popSel); return; }
   if (e.key === "Escape" && S.viewer) { e.preventDefault(); closeViewer(); return; }
@@ -1771,7 +1860,6 @@ function onKey(e) {
   if (e.code === "Space") { e.preventDefault(); togglePlay(); }
   else if (e.key === "ArrowRight") { e.preventDefault(); video.pause(); seekMs(nowMs() + (e.shiftKey ? 1000 : FPS_STEP)); }
   else if (e.key === "ArrowLeft") { e.preventDefault(); video.pause(); seekMs(nowMs() - (e.shiftKey ? 1000 : FPS_STEP)); }
-  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); }
   else if (e.key === "Delete" || e.key === "Backspace") { if (S.selected) { e.preventDefault(); flip(S.selected); } }
   else if (e.key.toLowerCase() === "m") setMode(S.mode === "edited" ? "raw" : "edited");
   else if (e.key === "+" || e.key === "=") zoomTo(S.pps * 1.5);
@@ -1959,17 +2047,18 @@ function textPanelHTML() {
 // Ridisegna i pannelli Testo visibili (a sinistra e nello schermo intero).
 function renderTextPanels() {
   const boxes = [];
-  if (["text", "stickers", "images", "effects"].includes(S.leftTab)) boxes.push([$("#left-content"), S.leftTab]);
+  if (["text", "stickers", "images", "effects", "audio", "transitions", "filters", "vfx"].includes(S.leftTab)) boxes.push([$("#left-content"), S.leftTab]);
   if (S.viewer && S.txPanel) boxes.push([$("#viewer-panel"), S.viewerTab]);
   for (const [box, tab] of boxes) {
     // non interrompere chi sta scrivendo o trascinando un cursore
     const active = document.activeElement;
-    if (box.contains(active) && ["tx-text", "st-custom", "img-q"].includes(active.id)) continue;
+    if (box.contains(active) && ["tx-text", "st-custom", "img-q", "vfx-text"].includes(active.id)) continue;
     if (S.txSliding && box.contains(S.txSliding)) continue;
     const top = box.scrollTop;
-    box.innerHTML = tab === "stickers" ? stickerPanelHTML() : tab === "effects" ? effectsPanelHTML()
-      : tab === "images" ? imagesPanelHTML() : textPanelHTML();
-    if (tab === "effects") maybeAutoFx();
+    if (tab === "transitions") S.fxTab = "trans"; // la scheda Transizioni = giunte del pannello Effetti
+    box.innerHTML = tab === "stickers" ? stickerPanelHTML() : tab === "effects" || tab === "transitions" ? effectsPanelHTML()
+      : tab === "images" ? imagesPanelHTML() : tab === "vfx" ? vfxPanelHTML() : tab === "audio" ? audioPanelHTML() : tab === "filters" ? filtersPanelHTML() : textPanelHTML();
+    if (tab === "effects" || tab === "transitions") maybeAutoFx();
     box.scrollTop = top;
   }
 }
@@ -1984,6 +2073,8 @@ function toggleViewerPanel(on = !S.txPanel, tab = S.viewerTab) {
   $("#v-sticker")?.classList.toggle("on", on && tab === "stickers");
   $("#v-effects")?.classList.toggle("on", on && tab === "effects");
   $("#v-images")?.classList.toggle("on", on && tab === "images");
+  $("#v-audio")?.classList.toggle("on", on && tab === "audio");
+  $("#v-vfx")?.classList.toggle("on", on && tab === "vfx");
   if (on) renderTextPanels();
   if (S.viewer) fitFrame();
 }
@@ -2437,6 +2528,673 @@ async function deletePop(id) {
   await mutate("/api/popups/item", { id, action: "delete" }, "Sticker eliminato");
 }
 
+// --- filtri: il colore del video (sopra il look dello stile) ------------------------------
+
+const FILTER_SLIDERS = [
+  ["brightness", "Luminosità", 0.6, 1.4, 0.01, (v) => `${Math.round((v - 1) * 100)}%`],
+  ["contrast", "Contrasto", 0.5, 1.6, 0.01, (v) => `${Math.round((v - 1) * 100)}%`],
+  ["saturation", "Saturazione", 0, 2, 0.01, (v) => `${Math.round((v - 1) * 100)}%`],
+  ["warmth", "Calore", 0, 0.4, 0.01, (v) => `${Math.round(v * 250)}`],
+  ["hue", "Tinta", -40, 40, 1, (v) => `${Math.round(v)}°`],
+  ["vignette", "Vignetta", 0, 1, 0.01, (v) => `${Math.round(v * 100)}%`],
+];
+
+function gradeCss(g) {
+  const parts = [`contrast(${g.contrast})`, `saturate(${g.saturation})`, `brightness(${g.brightness})`];
+  if (g.warmth) parts.push(`sepia(${g.warmth})`);
+  if (g.hue) parts.push(`hue-rotate(${g.hue}deg)`);
+  if (g.grayscale) parts.push(`grayscale(${g.grayscale})`);
+  return parts.join(" ");
+}
+
+function filtersPanelHTML() {
+  const f = S.data?.filters;
+  if (!S.look || !f?.grade) {
+    const btns = (S.data?.styles ?? []).map((s) => `<button class="btn" data-tx-style="${esc(s.id)}">${esc(s.name)}</button>`).join("");
+    return `<div class="placeholder"><svg viewBox="0 0 24 24"><circle cx="9" cy="10" r="5"/><circle cx="15" cy="10" r="5"/><circle cx="12" cy="15" r="5"/></svg>
+      <b>Filtri</b><br>Scegli prima uno stile: i filtri partono dal suo look del colore.</div><div class="btn-row tx-styles">${btns}</div>`;
+  }
+  const thumb = `/media/thumbs/${Math.max(1, Math.min(S.data.media.thumb_count, Math.floor((nowMs() - S.axisStart) / S.data.media.thumb_interval_ms) + 1))}.jpg`;
+  const cards = f.presets.map((p) => {
+    const g = { ...f.style_grade, ...p.values };
+    return `<button class="flt-card${p.id === f.preset ? " on" : ""}" data-flt-preset="${p.id}">
+      <img src="${thumb}" alt="" style="filter:${gradeCss(g)}"><span>${esc(p.label)}</span></button>`;
+  }).join("");
+  const g = f.grade;
+  const sliders = FILTER_SLIDERS.map(([k, label, min, max, step, fmt]) => `
+    <div class="section-title">${label} <span class="tx-val" id="flt-${k}-val">${fmt(g[k] ?? 0)}</span></div>
+    <input type="range" class="tx-range" data-flt="${k}" min="${min}" max="${max}" step="${step}" value="${g[k] ?? 0}">`).join("");
+  return `
+    <div class="tx-hint" style="margin-top:0">Il colore del video per lo stile ${esc(S.look.style_name)}: vale nell'anteprima, nel render e nella copertina.</div>
+    <div class="flt-grid">${cards}</div>
+    ${sliders}
+    <div class="btn-row tx-actions"><button class="btn" data-flt-act="reset">Torna al look dello stile</button></div>`;
+}
+
+function wireFiltersPanel(box) {
+  box.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-flt-preset],[data-flt-act]");
+    if (!b || S.leftTab !== "filters") return;
+    if (b.dataset.fltPreset) mutate("/api/filters", { preset: b.dataset.fltPreset }, "Filtro applicato");
+    else if (b.dataset.fltAct === "reset") mutate("/api/filters", { reset: true }, "Look dello stile");
+  });
+  box.addEventListener("input", (e) => {
+    const r = e.target.closest("[data-flt]");
+    if (!r) return;
+    S.txSliding = r;
+    const k = r.dataset.flt;
+    const v = Number(r.value);
+    const fmt = FILTER_SLIDERS.find((s) => s[0] === k)[5];
+    box.querySelector(`#flt-${k}-val`).textContent = fmt(v);
+    const live = { ...S.data.filters.grade, [k]: v };
+    video.style.filter = gradeCss(live); // anteprima dal vivo mentre trascini
+    if (k === "vignette") $("#vignette").style.background = v > 0 ? `radial-gradient(ellipse at 50% 42%, transparent 48%, rgba(0,0,0,${(0.85 * v).toFixed(2)}) 100%)` : "";
+  });
+  box.addEventListener("change", async (e) => {
+    const r = e.target.closest("[data-flt]");
+    if (!r) return;
+    S.txSliding = null;
+    await mutate("/api/filters", { values: { [r.dataset.flt]: Number(r.value) } });
+  });
+}
+
+// --- esporta: anteprima delle copertine (Shorts 9:16 e YouTube 16:9) ---------------------
+// Claude propone frase e sfondo; Higgsfield genera solo quando premi Genera (costa crediti).
+
+const COVER_PHASE = { render: "Creo la copertina…", queued: "In coda…", person: "Ti metto nella scena (Soul)…", cover: "Impagino la copertina in 4K…", download: "Scarico…", done: "Fatto" };
+const COVER_LABEL = { "9:16": "Shorts · 9:16", "16:9": "YouTube · 16:9" };
+
+function coverChosen(ratio) {
+  const c = S.data?.covers;
+  const list = c?.versions?.[ratio] ?? [];
+  if (!list.length) return null;
+  return list.find((v) => v.index === c.chosen?.[ratio]) ?? list[list.length - 1];
+}
+
+// «ME NE VADO IN» + «THAILANDIA» → «Me ne vado in Thailandia» (come un titolo YouTube)
+function ytTitle(k) {
+  const cap = (s) => s.toLowerCase().replace(/^./, (m) => m.toUpperCase());
+  const kicker = k.kicker ? cap(k.kicker) : "";
+  const title = k.title ? k.title.toLowerCase().replace(/(^|\s)\S/g, (m) => m.toUpperCase()) : "";
+  return kicker && title ? `${kicker} ${title}` : cap(kicker || title);
+}
+
+function coverCard(ratio) {
+  const c = S.data.covers;
+  const list = c.versions[ratio] ?? [];
+  const cur = coverChosen(ratio);
+  const busy = c.job?.status === "running";
+  const mine = busy && c.job.ratio === ratio;
+  const img = cur ? `<img src="${esc(cur.url)}" alt="Copertina ${esc(COVER_LABEL[ratio])}">`
+    : `<div class="cv-empty">${mine ? "" : "Nessuna copertina: premi Genera"}</div>`;
+  const shell = ratio === "9:16"
+    ? `<div class="cv-phone">${img}${mine ? `<div class="cv-busy"><i></i>${esc(COVER_PHASE[c.job.phase] ?? "…")}</div>` : ""}</div>`
+    : `<div class="cv-yt"><div class="cv-yt-img">${img}<span class="cv-dur">${clock(S.data.summary.kept_ms, false)}</span>${mine ? `<div class="cv-busy"><i></i>${esc(COVER_PHASE[c.job.phase] ?? "…")}</div>` : ""}</div>
+        <div class="cv-yt-meta"><span class="cv-avatar">${c.person.face_url ? `<img src="${esc(c.person.face_url)}" alt="">` : ""}</span>
+          <div><b>${esc(ytTitle(c.concept) || "Titolo del video")}</b>
+          <span>${esc(c.person.name || "Il tuo canale")} · in anteprima</span></div></div></div>`;
+  const strip = list.length > 1 ? `<div class="cv-strip">${list.map((v) =>
+    `<button class="${v.index === cur?.index ? "on" : ""}" data-cv-choose="${ratio}" data-i="${v.index}" title="Versione ${v.index + 1}"><img src="${esc(v.url)}" alt=""></button>`).join("")}</div>` : "";
+  const tiny = cur ? `<div class="cv-tiny" title="Così si vede piccola nel feed"><img src="${esc(cur.url)}" alt=""><span>nel feed</span></div>` : "";
+  const armed = S.coverArm === ratio;
+  const free = c.mode === "viral";
+  return `
+    <div class="cv-card r${ratio.replace(":", "x")}">
+      <div class="cv-head"><b>${COVER_LABEL[ratio]}</b>${list.length ? `<span class="meta">${list.length} version${list.length > 1 ? "i" : "e"}</span>` : ""}</div>
+      ${shell}${strip}
+      <div class="cv-actions">
+        <button class="btn ${armed ? "danger" : "ai"}" data-cv-gen="${ratio}" ${busy || !c.ready ? "disabled" : ""}
+          title="${!c.ready ? "Scegli prima uno stile" : free ? "Gratis, in locale" : S.aiStatus?.higgsfield !== "connected" ? "Prima ricollega Higgsfield" : ""}">
+          ${free ? (cur ? "↻ Rifai copertina" : "✦ Crea copertina") : armed ? `Conferma · ${esc(c.cost_hint)}` : cur ? "↻ Rigenera" : "✦ Genera"}</button>
+        ${cur ? `<a class="btn" href="${esc(cur.url)}" download="copertina-${ratio === "9:16" ? "shorts" : "youtube"}.png">⬇ Scarica</a>` : ""}
+        ${tiny}
+      </div>
+    </div>`;
+}
+
+function exportHTML() {
+  const c = S.data?.covers;
+  if (!c) return `<div class="ex-box"><div class="placeholder">L'editor in esecuzione è una versione vecchia: chiudilo e rilancialo.</div></div>`;
+  const k = c.concept;
+  const err = c.job?.status === "error" ? `<div class="tx-hint err">Copertina non riuscita: ${esc(c.job.error)}</div>` : "";
+  const notReady = !c.ready ? `<div class="cv-note"><span>Scegli uno stile per la copertina: <b>Premium</b> (Shorts + YouTube con Higgsfield) o <b>Viral</b> (verticale, fotogramma + frase d'esordio).</span>
+      <span><button class="btn ai small" data-ex="premium">Premium</button> <button class="btn ai small" data-ex="viral">Viral</button></span></div>` : "";
+  const st = S.aiStatus;
+  const hf = !st ? `<span class="hf-dot wait"></span>Controllo Higgsfield…`
+    : st.higgsfield === "connected" ? `<span class="hf-dot ok"></span>Higgsfield collegato${st.credits != null ? ` · ${Math.floor(st.credits)} crediti` : ""}`
+    : `<span class="hf-dot bad"></span>Higgsfield ${st.higgsfield === "missing" ? "non installato" : "non collegato (sessione scaduta)"}
+       ${st.higgsfield === "missing" ? "" : `<button class="btn small" data-ex="login" ${S.hfLogin ? "disabled" : ""}>${S.hfLogin ? "Aspetto il login nel browser…" : "Ricollega"}</button>`}`;
+  const viral = c.mode === "viral";
+  const SW = ["#FFB800", "#FF7A00", "#FF3B30", "#FF2D78", "#00E676", "#1FD3CF", "#2F6BFF", "#FFFFFF"];
+  const accent = k.accent ?? c.accent_auto;
+  const viralForm = `
+          <div class="section-title">Di cosa parla il video</div>
+          <textarea class="cv-in" rows="2" data-cv="topic" placeholder="es. voglio andare a vivere in Thailandia">${esc(k.topic)}</textarea>
+          <button class="btn ai wide" data-ex="concept" ${S.coverThinking ? "disabled" : ""}>${S.coverThinking ? "Claude sta pensando…" : "✦ Proponi la frase d'esordio con Claude"}</button>
+          <div class="section-title">Frase d'esordio</div>
+          <input class="cv-in" data-cv="kicker" value="${esc(k.kicker)}" maxlength="40" placeholder="Riga piccola · es. A STO GIRO L'AVETE">
+          <input class="cv-in big" data-cv="title" value="${esc(k.title)}" maxlength="28" placeholder="Riga grande · es. FATTA GROSSA">
+          <input class="cv-in" data-cv="sub" value="${esc(k.sub)}" maxlength="40" placeholder="Riga piccolissima sotto · es. arrivo al locale">
+          <div class="section-title">Emoji <span class="meta">(0-2, ai lati della prima riga)</span></div>
+          <div class="cv-emo"><input class="cv-in" data-cv="emojis" value="${esc(k.emojis)}" maxlength="16" placeholder="es. 🤬⚠️">
+            ${["😱", "🔥", "🤬", "⚠️", "😂", "💰", "🇹🇭", "✈️", "👀", "🚨"].map((e) => `<button class="chip" data-cv-emo="${e}">${emojiHTML(e)}</button>`).join("")}
+            <button class="chip" data-cv-emo="">✕</button></div>
+          <div class="section-title">Colore della riga piccola</div>
+          <div class="cv-sw">${SW.map((h) => `<button class="sw${accent.toUpperCase() === h ? " on" : ""}" style="background:${h}" data-cv-accent="${h}" title="${h}"></button>`).join("")}
+            <label class="sw pick" title="Altro colore"><input type="color" data-cv-accent-pick value="${esc(accent)}"></label></div>
+          <div class="section-title">Font</div>
+          <select class="cv-in" data-cv="font">${c.fonts.map((f, i) => `<option value="${i === 0 ? "" : esc(f)}" ${(k.font ?? "") === (i === 0 ? "" : f) ? "selected" : ""}>${esc(f)}${i === 0 ? " · apertura del video" : " · sottotitoli"}</option>`).join("")}</select>
+          <div class="section-title">Fotogramma</div>
+          <div class="cv-frame"><img src="${esc(c.frame_url)}" alt="">
+            <div><div class="meta">${k.frame_ms == null ? "Apertura del video" : `a ${showTime(k.frame_ms)}`}</div>
+              <button class="btn small" data-ex="frame-here" title="Usa il fotogramma dove c'è la testina">Usa la testina (${showTime(nowMs())})</button>
+              ${k.frame_ms == null ? "" : `<button class="btn small" data-ex="frame-open">Torna all'apertura</button>`}</div></div>
+          <div class="tx-hint">Gratis e in locale (Remotion, ~10 s): stesso font, contorno e ombra dell'apertura del video.</div>
+          ${err}`;
+  return `
+    <div class="ex-box${viral ? " viral" : ""}" role="dialog" aria-label="Esporta">
+      <div class="ex-head"><b>Esporta · Copertina</b><span class="meta">${esc(S.look?.style_name ?? "nessuno stile")}</span>
+        ${viral ? `<span class="hf-state">Copertina verticale · fotogramma + frase d'esordio</span>` : `<span class="hf-state">${hf}</span>`}
+        <button class="icon-btn" data-ex="close" title="Chiudi (Esc)">✕</button></div>
+      ${notReady}
+      <div class="ex-body">
+        <div class="ex-form">${viral ? viralForm : `
+          <div class="cv-person">
+            <span class="cv-face">${c.person.face_url ? `<img src="${esc(c.person.face_url)}" alt="">` : "🙂"}</span>
+            <div><input class="cv-in" data-cv-person="name" value="${esc(c.person.name)}" placeholder="Nome (tuo o del cliente)">
+              <input class="cv-in small" data-cv-person="soul_id" value="${esc(c.person.soul_id ?? "")}" placeholder="Soul ID su Higgsfield (facoltativo)"></div>
+            <button class="btn small" data-ex="face" title="Foto frontale del volto: tiene la stessa identità">Foto volto</button>
+            <input type="file" id="cv-face-file" accept="image/*" hidden>
+          </div>
+          <div class="section-title">Di cosa parla il video</div>
+          <textarea class="cv-in" rows="2" data-cv="topic" placeholder="es. voglio andare a vivere in Thailandia">${esc(k.topic)}</textarea>
+          <button class="btn ai wide" data-ex="concept" ${S.coverThinking ? "disabled" : ""}>${S.coverThinking ? "Claude sta pensando…" : "✦ Proponi frase e sfondo con Claude"}</button>
+          <div class="section-title">Frase</div>
+          <input class="cv-in" data-cv="kicker" value="${esc(k.kicker)}" maxlength="40" placeholder="Riga piccola · es. ME NE VADO IN">
+          <input class="cv-in big" data-cv="title" value="${esc(k.title)}" maxlength="28" placeholder="Scritta grande · es. THAILANDIA">
+          <div class="section-title">Sfondo <span class="meta">(in inglese per Higgsfield)</span></div>
+          <textarea class="cv-in" rows="3" data-cv="scene" placeholder="Krabi, Thailand at golden hour — limestone cliffs, turquoise water, a longtail boat">${esc(k.scene)}</textarea>
+          <div class="section-title">Espressione e vestiti</div>
+          <input class="cv-in" data-cv="expression" value="${esc(k.expression)}">
+          <input class="cv-in" data-cv="wardrobe" value="${esc(k.wardrobe)}" placeholder="es. open-collar cream linen shirt">
+          <div class="tx-hint">Genera costa ${esc(c.cost_hint)} (Higgsfield): parte solo quando confermi.</div>
+          ${err}`}
+        </div>
+        <div class="ex-previews">${(c.ratios ?? ["9:16", "16:9"]).map(coverCard).join("")}</div>
+      </div>
+      <div class="ex-foot">${exportFoot()}</div>
+    </div>`;
+}
+
+// Video intero: render con tutto quello che hai fatto, copertina scelta dentro il file.
+function exportFoot() {
+  const x = S.data?.export;
+  const job = x?.job ?? {};
+  if (job.status === "running") {
+    const secs = Math.round(Date.now() / 1000 - (job.started ?? Date.now() / 1000));
+    return `<span class="ex-run"><i></i><span><b>Esporto il video… ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}</b>
+      <span class="meta">${esc(job.phase === "cover" ? "metto la copertina nel file" : job.log || "render con Remotion: qualche minuto")}</span></span></span>
+      <button class="btn export" disabled>Esportazione in corso</button>`;
+  }
+  const err = job.status === "error" ? `<span class="tx-hint err">Esportazione non riuscita: ${esc(job.error)}</span>` : "";
+  const last = x?.last ? `<a class="btn" href="${esc(x.last.url)}" download="${esc(x.last.name)}">⬇ Scarica ${esc(x.last.name)} (${String(x.last.mb).replace(".", ",")} MB)</a>` : "";
+  const cov = coverChosen(S.portrait ? "9:16" : "16:9");
+  return `${err || `<span class="tx-hint">${cov ? "La copertina scelta va dentro il file MP4." : "Senza copertina scelta il video esce senza miniatura."} Tagli, testo, sticker, immagini, effetti, audio e filtri: tutto come nell'editor.</span>`}
+    <span class="ex-actions">${last}<button class="btn export" data-ex="video" ${S.data?.style ? "" : "disabled"}>⬆ Esporta video</button></span>`;
+}
+
+function renderExport() {
+  const m = $("#export-modal");
+  if (!m || m.hidden) return;
+  if (m.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return; // stai scrivendo
+  m.innerHTML = exportHTML();
+}
+
+function openExport() {
+  video.pause();
+  const m = $("#export-modal");
+  m.hidden = false;
+  m.innerHTML = exportHTML();
+  const c = S.data?.covers;
+  loadAiStatus(true).then(renderExport);
+  if (c?.ready && !c.concept.title && !S.coverThinking) coverConcept(); // prima volta: Claude propone
+}
+
+// Mentre esporta: aggiorna il tempo ogni secondo e lo stato ogni 4 (polling generale).
+function exportTicker() {
+  clearInterval(S.exportTimer);
+  S.exportTimer = setInterval(() => {
+    if (S.data?.export?.job?.status !== "running") { clearInterval(S.exportTimer); renderExport(); return; }
+    const foot = $("#export-modal .ex-foot");
+    if (foot) foot.innerHTML = exportFoot();
+  }, 1000);
+}
+
+// Ricollega Higgsfield: si apre il login nel browser; ricontrollo finché non è collegato.
+async function hfLogin() {
+  try {
+    await api("/api/higgsfield/login", {});
+  } catch (e) {
+    toast(`Non riesco ad aprire il login: ${e.message}`, true);
+    return;
+  }
+  S.hfLogin = true;
+  renderExport();
+  toast("Si è aperto il login di Higgsfield nel browser: accedi e torna qui");
+  for (let i = 0; i < 60 && S.hfLogin; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    await loadAiStatus(true);
+    if (S.aiStatus?.higgsfield === "connected") break;
+  }
+  S.hfLogin = false;
+  renderExport();
+  if (S.aiStatus?.higgsfield === "connected") toast("Higgsfield collegato");
+}
+
+function closeExport() {
+  $("#export-modal").hidden = true;
+  S.coverArm = null;
+}
+
+async function coverConcept() {
+  const hint = $("#export-modal [data-cv=topic]")?.value ?? "";
+  S.coverThinking = true;
+  renderExport();
+  try {
+    apply(await api("/api/covers/concept", { hint }));
+    toast("Frase e sfondo proposti da Claude: cambiali come vuoi");
+  } catch (e) {
+    toast(`Claude non ha risposto: ${e.message}`, true);
+  } finally {
+    S.coverThinking = false;
+    document.activeElement?.blur?.();
+    renderExport();
+  }
+}
+
+async function saveCover(extra) {
+  const f = coverFields();
+  await mutate("/api/covers/save", { ...f, concept: { ...f.concept, ...extra } });
+  document.activeElement?.blur?.();
+  renderExport();
+}
+
+function coverFields() {
+  const m = $("#export-modal");
+  const concept = {};
+  m.querySelectorAll("[data-cv]").forEach((el) => { concept[el.dataset.cv] = el.value; });
+  const person = {};
+  m.querySelectorAll("[data-cv-person]").forEach((el) => { person[el.dataset.cvPerson] = el.value.trim() || null; });
+  return { concept, person };
+}
+
+function wireExport() {
+  const m = $("#export-modal");
+  $("#btn-export").addEventListener("click", openExport);
+  m.addEventListener("click", async (e) => {
+    if (e.target === m) { closeExport(); return; }
+    const b = e.target.closest("[data-ex],[data-cv-gen],[data-cv-choose],[data-cv-emo],[data-cv-accent]");
+    if (!b || b.disabled) return;
+    const d = b.dataset;
+    if (d.ex === "close") closeExport();
+    else if (d.ex === "premium") { await mutate("/api/style", { id: "premium" }, "Stile Premium"); renderExport(); }
+    else if (d.ex === "viral") { await mutate("/api/style", { id: "viral" }, "Stile Viral"); renderExport(); }
+    else if (d.ex === "frame-here") { await saveCover({ frame_ms: Math.round(nowMs()) }); }
+    else if (d.ex === "frame-open") { await saveCover({ frame_ms: null }); }
+    else if ("cvEmo" in d) {
+      const inp = m.querySelector("[data-cv=emojis]");
+      const cur = emojiParts(inp.value);
+      inp.value = d.cvEmo === "" ? "" : [...cur, d.cvEmo].slice(-2).join("");
+      await saveCover({ emojis: inp.value });
+    } else if (d.cvAccent) { await saveCover({ accent: d.cvAccent }); }
+    else if (d.ex === "login") hfLogin();
+    else if (d.ex === "video") { await mutate("/api/export/video", {}, "Esportazione avviata: ci vuole qualche minuto"); exportTicker(); }
+    else if (d.ex === "concept") coverConcept();
+    else if (d.ex === "face") m.querySelector("#cv-face-file").click();
+    else if (d.cvChoose) mutate("/api/covers/choose", { ratio: d.cvChoose, index: Number(d.i) }).then(renderExport);
+    else if (d.cvGen && S.data?.covers?.mode === "viral") {
+      await mutate("/api/covers/save", coverFields());
+      await mutate("/api/covers/generate", { ratio: d.cvGen }, "Creo la copertina…");
+      renderExport();
+    } else if (d.cvGen) {
+      if (S.coverArm !== d.cvGen) { // primo clic: chiede conferma (costa crediti)
+        S.coverArm = d.cvGen;
+        renderExport();
+        setTimeout(() => { if (S.coverArm === d.cvGen) { S.coverArm = null; renderExport(); } }, 5000);
+        return;
+      }
+      S.coverArm = null;
+      if (S.aiStatus?.higgsfield !== "connected") {
+        await loadAiStatus(true);
+        if (S.aiStatus?.higgsfield !== "connected") { toast("Higgsfield non è collegato: premi Ricollega", true); renderExport(); return; }
+      }
+      await mutate("/api/covers/save", coverFields());
+      await mutate("/api/covers/generate", { ratio: d.cvGen }, "Genero la copertina con Higgsfield…");
+      renderExport();
+    }
+  });
+  m.addEventListener("change", async (e) => {
+    if (e.target.id === "cv-face-file") {
+      const f = e.target.files?.[0];
+      e.target.value = "";
+      if (!f) return;
+      const fr = new FileReader();
+      fr.onload = async () => { await mutate("/api/covers/face", { data: fr.result, name: f.name }, "Foto del volto salvata"); renderExport(); };
+      fr.readAsDataURL(f);
+      return;
+    }
+    if (e.target.matches("[data-cv-accent-pick]")) { await saveCover({ accent: e.target.value.toUpperCase() }); return; }
+    if (e.target.matches("[data-cv],[data-cv-person]")) {
+      await mutate("/api/covers/save", coverFields());
+    }
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !m.hidden) { e.preventDefault(); e.stopImmediatePropagation(); closeExport(); }
+  }, true);
+}
+
+// --- audio: voce, effetti sonori, suoni nella timeline (pannello Audio) ------------------
+// I suoni li sceglie lo stile; qui si alzano, si abbassano, si spostano, si cambiano, se ne
+// aggiungono. L'anteprima li suona con la stessa normalizzazione della voce del render.
+
+const SND = { ctx: null, voice: null, out: null, buffers: new Map(), playing: [], prev: null };
+
+const audioData = () => S.data?.audio ?? null;
+const soundItem = (id) => (audioData()?.sounds ?? []).find((s) => s.id === id) ?? null;
+const dbTxt = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(Math.round(v * 10) / 10).toString().replace(".", ",")} dB`;
+const FAMILY_ICON = { whooshes: "💨", textures: "✨", risers: "📈", hits: "💥" };
+
+function ensureAudio() {
+  if (SND.ctx) { if (SND.ctx.state === "suspended") SND.ctx.resume(); return; }
+  if (!window.AudioContext) return;
+  try {
+    const ctx = new AudioContext();
+    const lim = ctx.createDynamicsCompressor(); // limitatore come nel render
+    lim.threshold.value = -2; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.002; lim.release.value = 0.12;
+    lim.connect(ctx.destination);
+    const voice = ctx.createGain();
+    ctx.createMediaElementSource(video).connect(voice);
+    voice.connect(lim);
+    Object.assign(SND, { ctx, voice, out: lim });
+    applyVoiceGain();
+  } catch (e) {
+    console.warn("audio dell'anteprima non disponibile", e);
+  }
+}
+
+function applyVoiceGain(liveDb) {
+  const a = audioData();
+  if (!a) return;
+  const db = (a.voice_norm_db ?? 0) + (liveDb ?? a.voice_db);
+  const g = a.voice_muted ? 0 : Math.pow(10, db / 20);
+  if (SND.voice) SND.voice.gain.value = g;
+  else video.volume = Math.max(0, Math.min(1, g));
+}
+
+function sndBuffer(url) {
+  if (!SND.buffers.has(url)) {
+    SND.buffers.set(url, fetch(url).then((r) => r.arrayBuffer()).then((b) => SND.ctx.decodeAudioData(b)));
+  }
+  return SND.buffers.get(url);
+}
+
+function playUrl(url, gainDb, offsetMs = 0) {
+  ensureAudio();
+  if (!SND.ctx) return;
+  sndBuffer(url).then((buf) => {
+    const src = SND.ctx.createBufferSource();
+    src.buffer = buf;
+    const g = SND.ctx.createGain();
+    g.gain.value = Math.pow(10, gainDb / 20);
+    src.connect(g);
+    g.connect(SND.out);
+    src.start(0, Math.max(0, offsetMs / 1000));
+    SND.playing.push(src);
+    src.onended = () => { SND.playing = SND.playing.filter((x) => x !== src); };
+  }).catch(() => {});
+}
+
+function stopSounds() {
+  SND.playing.forEach((s) => { try { s.stop(); } catch { /* già finito */ } });
+  SND.playing = [];
+}
+
+// Suona gli effetti quando la testina li attraversa (anche saltando le parti tolte).
+function updateSounds(cur) {
+  const a = audioData();
+  if (video.paused || !a || !SND.ctx) { SND.prev = null; return; }
+  const prev = SND.prev;
+  SND.prev = cur;
+  if (prev === null || cur <= prev) return;
+  for (const s of a.sounds) {
+    if (s.muted) continue;
+    const start = s.at_ms - s.lead_ms;
+    const late = S.mode === "edited" && isCut(start); // l'attacco cade in una parte tolta
+    const trig = late ? s.at_ms : start;
+    if (prev < trig && trig <= cur && cur - trig < 350) playUrl(s.url, s.gain_db, cur - trig + (late ? s.lead_ms : 0));
+  }
+}
+
+function renderAudioTrack() {
+  const el = $("#track-audio");
+  const a = audioData();
+  if (!el) return;
+  if (!a) { el.innerHTML = ""; return; }
+  el.innerHTML = a.sounds.map((s) => {
+    const left = xOf(s.at_ms - s.lead_ms);
+    const width = Math.max(10, (s.duration_ms / 1000) * S.pps);
+    const cls = ["snd", `f-${s.family}`, s.muted ? "muted" : "", s.id === S.sndSel ? "sel" : "", s.origin === "user" ? "user" : "", isCut(s.at_ms) ? "cut" : ""].join(" ");
+    return `<div class="${cls}" data-snd="${esc(s.id)}" style="left:${left}px;width:${width}px" title="${esc(s.label)} · ${esc(s.reason)} · ${dbTxt(s.gain_db)}${s.muted ? " · muto" : ""}">
+      <i>${FAMILY_ICON[s.family] ?? "♪"}</i><span>${width > 46 ? esc(s.label) : ""}</span></div>`;
+  }).join("") + (a.voice_muted ? `<div class="snd-note">voce muta</div>` : "");
+}
+
+function selectSound(id, { open = true } = {}) {
+  S.sndSel = id;
+  renderAudioTrack();
+  if (!open) return;
+  if (S.viewer) toggleViewerPanel(true, "audio");
+  else if (S.leftTab !== "audio") { S.leftTab = "audio"; renderLeft(); }
+  else renderTextPanels();
+}
+
+const saveAudio = (body, msg) => mutate("/api/audio", body, msg);
+
+function audioPanelHTML() {
+  const a = audioData();
+  if (!a) {
+    return `<div class="placeholder"><b>Audio</b><br>L'editor in esecuzione è una versione vecchia.
+      Chiudilo (Ctrl+C nel terminale) e rilancia <code>autocut editor ${esc(S.data?.project ?? "")}</code>.</div>`;
+  }
+  const slider = (key, val, min, max) => `
+    <input type="range" class="tx-range" data-au-range="${key}" min="${min * 10}" max="${max * 10}" step="5" value="${Math.round(val * 10)}">`;
+  const sel = soundItem(S.sndSel);
+  const lib = a.library ?? [];
+  let selBox = "";
+  if (sel) {
+    const opts = lib.map((l) => `<option value="${esc(l.type)}" ${l.type === sel.type ? "selected" : ""}>${esc(l.family_label)} · ${esc(l.label)}</option>`).join("");
+    selBox = `
+      <div class="st-sel">
+        <div class="st-sel-head"><span class="st-thumb">${FAMILY_ICON[sel.family] ?? "♪"}</span><div><b>${esc(sel.label)}</b>
+          <div class="meta">a ${showTime(sel.at_ms)} · ${esc(sel.reason)}${sel.origin === "auto" ? " · scelto dallo stile" : ""}</div></div>
+          <button class="icon-btn" data-au="close" title="Deseleziona">✕</button></div>
+        <div class="btn-row tx-actions">
+          <button class="btn" data-au="play">▶ Ascolta</button>
+          <button class="btn${sel.own_muted ? " on" : ""}" data-au="mute">${sel.own_muted ? "🔇 Muto" : "🔊 Attivo"}</button>
+          <button class="btn" data-au="here" title="Il suono parte dove c'è la testina">Sposta qui</button>
+          <button class="btn" data-au="left" title="0,1 s prima">◀</button><button class="btn" data-au="right" title="0,1 s dopo">▶</button>
+        </div>
+        <div class="section-title">Volume di questo suono <span class="tx-val" id="au-snd-val">${dbTxt(sel.offset_db)}</span></div>
+        ${slider("snd", sel.offset_db, -30, 12)}
+        <div class="section-title">Cambia suono</div>
+        <select class="au-select" data-au-type>${opts}</select>
+        <div class="btn-row tx-actions">
+          ${sel.origin === "user" ? `<button class="btn danger" data-au="delete">Elimina</button>`
+            : sel.edited ? `<button class="btn" data-au="reset">Torna com'era</button>` : ""}
+        </div>
+        <div class="tx-hint">Puoi anche trascinarlo nella traccia audio della timeline.</div>
+      </div>`;
+  }
+  const list = a.sounds.map((s) => `
+    <button class="st-item${s.id === S.sndSel ? " on" : ""}${s.muted ? " dim" : ""}" data-au-pick="${esc(s.id)}">
+      <span class="t-ico on">${FAMILY_ICON[s.family] ?? "♪"}</span>
+      <span class="st-item-t">${showTime(s.at_ms)} · ${esc(s.label)}
+        <span class="meta">${s.muted ? "muto · " : ""}${dbTxt(s.gain_db)} · ${esc(s.reason)}</span></span>
+    </button>`).join("");
+  const fams = {};
+  for (const l of lib) (fams[l.family_label] ??= []).push(l);
+  const libHTML = Object.entries(fams).map(([fam, items]) => `
+    <div class="st-sub">${esc(fam)}</div>
+    <div class="au-lib">${items.map((l) => `
+      <div class="au-lib-item" title="${esc(l.usage)}">
+        <button class="icon-btn" data-au-lib-play="${esc(l.url)}" title="Ascolta">▶</button>
+        <span>${esc(l.label)}</span>
+        <button class="btn small" data-au-add="${esc(l.type)}" title="Aggiungi alla testina">+ Aggiungi</button>
+      </div>`).join("")}</div>`).join("");
+  return `
+    ${selBox}
+    <div class="au-card">
+      <div class="au-head"><b>🎙 Voce</b>
+        <button class="chip${a.voice_muted ? " on" : ""}" data-au="voice-mute">${a.voice_muted ? "🔇 Muta" : "🔊 Attiva"}</button></div>
+      <div class="section-title">Volume <span class="tx-val" id="au-voice_db-val">${dbTxt(a.voice_db)}</span></div>
+      ${slider("voice_db", a.voice_db, -24, 12)}
+      <div class="tx-hint">${a.voice_norm_db ? `Già portata al livello del render (${dbTxt(a.voice_norm_db)}): qui la alzi o abbassi rispetto a quello.` : "Rispetto al livello normalizzato del render."}</div>
+    </div>
+    <div class="au-card">
+      <div class="au-head"><b>✨ Effetti sonori</b>
+        <button class="chip${a.sfx_muted ? " on" : ""}" data-au="sfx-mute">${a.sfx_muted ? "🔇 Tutti muti" : "🔊 Attivi"}</button></div>
+      <div class="section-title">Volume di tutti <span class="tx-val" id="au-sfx_db-val">${dbTxt(a.sfx_db)}</span></div>
+      ${slider("sfx_db", a.sfx_db, -30, 12)}
+      ${a.style ? "" : `<div class="tx-hint">Scegli uno stile (Viral o Premium) per avere i suoni automatici.</div>`}
+    </div>
+    <div class="st-sub">Suoni nel video (${a.sounds.length})</div>
+    <div class="st-list">${list || `<div class="tx-hint">Nessun suono: aggiungine uno qui sotto.</div>`}</div>
+    <div class="section-title" style="margin-top:14px">Aggiungi un suono alla testina (${showTime(nowMs())})</div>
+    ${libHTML || `<div class="tx-hint">Libreria suoni vuota (library/sfx).</div>`}`;
+}
+
+function wireAudioPanel(box) {
+  box.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-au],[data-au-pick],[data-au-add],[data-au-lib-play]");
+    if (!b || b.disabled) return;
+    const d = b.dataset;
+    if (d.auLibPlay) { playUrl(d.auLibPlay, -12); return; }
+    if (d.auPick) {
+      const s = soundItem(d.auPick);
+      if (s) { video.pause(); seekMs(s.at_ms - s.lead_ms - 400); }
+      selectSound(d.auPick);
+      return;
+    }
+    if (d.auAdd) {
+      video.pause();
+      const before = new Set((audioData()?.sounds ?? []).map((s) => s.id));
+      await saveAudio({ target: "add", fields: { type: d.auAdd, at_ms: Math.round(nowMs()) } }, "Suono aggiunto alla testina");
+      const added = (audioData()?.sounds ?? []).find((s) => !before.has(s.id));
+      if (added) selectSound(added.id);
+      return;
+    }
+    const a = audioData();
+    const sel = soundItem(S.sndSel);
+    switch (d.au) {
+      case "voice-mute": saveAudio({ target: "mix", fields: { voice_muted: !a.voice_muted } }); break;
+      case "sfx-mute": saveAudio({ target: "mix", fields: { sfx_muted: !a.sfx_muted } }); break;
+      case "close": S.sndSel = null; renderTextPanels(); renderAudioTrack(); break;
+      case "play": if (sel) playUrl(sel.url, sel.gain_db); break;
+      case "mute": if (sel) saveAudio({ target: "sound", item: sel.id, fields: { muted: !sel.own_muted } }); break;
+      case "here": if (sel) saveAudio({ target: "sound", item: sel.id, fields: { shift_ms: Math.round(nowMs() + sel.lead_ms - sel.at_ms) } }, "Suono spostato"); break;
+      case "left": if (sel) saveAudio({ target: "sound", item: sel.id, fields: { shift_ms: -100 } }); break;
+      case "right": if (sel) saveAudio({ target: "sound", item: sel.id, fields: { shift_ms: 100 } }); break;
+      case "delete": if (sel) { S.sndSel = null; saveAudio({ target: "remove", item: sel.id }, "Suono eliminato"); } break;
+      case "reset": if (sel) saveAudio({ target: "reset", item: sel.id }, "Suono com'era"); break;
+    }
+  });
+  box.addEventListener("input", (e) => {
+    const r = e.target.closest("[data-au-range]");
+    if (!r) return;
+    S.txSliding = r;
+    const k = r.dataset.auRange;
+    const v = Number(r.value) / 10;
+    box.querySelector(`#au-${k}-val`).textContent = dbTxt(v);
+    if (k === "voice_db") applyVoiceGain(v);
+  });
+  box.addEventListener("change", async (e) => {
+    const t = e.target.closest("[data-au-type]");
+    if (t && S.sndSel) { saveAudio({ target: "sound", item: S.sndSel, fields: { type: t.value } }, "Suono cambiato"); return; }
+    const r = e.target.closest("[data-au-range]");
+    if (!r) return;
+    S.txSliding = null;
+    const k = r.dataset.auRange;
+    const v = Number(r.value) / 10;
+    if (k === "snd") { if (S.sndSel) await saveAudio({ target: "sound", item: S.sndSel, fields: { gain_db: v } }); }
+    else await saveAudio({ target: "mix", fields: { [k]: v } });
+    const s = soundItem(S.sndSel);
+    if (k === "snd" && s) playUrl(s.url, s.gain_db); // senti subito il nuovo volume
+  });
+}
+
+// --- tagli a mano: dividi alla testina, togli o rimetti un pezzo --------------------------
+
+function pieceKey(p) { return p ? `${p.start}-${p.end}` : ""; }
+
+function selectPiece(start, end, manual) {
+  S.piece = { start, end, manual };
+  S.selected = null;
+  renderRanges();
+  updateToggle();
+}
+
+async function splitHere() {
+  const ms = Math.round(nowMs());
+  video.pause();
+  const data = await mutate("/api/cuts", { action: "split", ms }, "Diviso: clicca un pezzo e premi Togli (Canc)");
+  if (!data) return;
+  // seleziona il pezzo dopo la divisione, pronto da togliere
+  const piece = visiblePieces().find((p) => p.start === ms && p.keep);
+  if (piece) selectPiece(piece.start, piece.end, false);
+}
+
+function togglePiece() {
+  const p = S.piece;
+  if (!p) return;
+  S.piece = null;
+  if (p.manual) mutate("/api/cuts", { action: "restore", start: p.start, end: p.end }, "Pezzo rimesso");
+  else mutate("/api/cuts", { action: "remove", start: p.start, end: p.end }, "Pezzo tolto");
+}
+
+// Pezzi come si vedono nella traccia video: le parti tenute divise ai punti di divisione.
+function visiblePieces() {
+  const splits = S.data?.cuts?.splits ?? [];
+  const out = [];
+  S.eff.forEach((r, i) => {
+    if (r.state !== "keep") { out.push({ i, start: r.start_ms, end: r.end_ms, keep: false, r }); return; }
+    let a = r.start_ms;
+    for (const s of splits) {
+      if (s > a + 20 && s < r.end_ms - 20) { out.push({ i, start: a, end: s, keep: true, r }); a = s; }
+    }
+    out.push({ i, start: a, end: r.end_ms, keep: true, r });
+  });
+  return out;
+}
+
+function openCaptionEditor(i) {
+  const c = S.chunks[i];
+  if (!c) return;
+  video.pause();
+  seekMs(c.start + 30);
+  S.txChunk = i;
+  S.txScope = "scene";
+  S.txSel = true;
+  S.popSel = null;
+  if (S.viewer) toggleViewerPanel(true, "text");
+  else if (S.leftTab !== "text") { S.leftTab = "text"; renderLeft(); }
+  else renderTextPanels();
+  renderTextTrack();
+  setTimeout(() => {
+    const ta = (S.viewer ? $("#viewer-panel") : $("#left-content")).querySelector("#tx-text");
+    if (ta && !ta.disabled) { ta.focus(); ta.select(); }
+  }, 30);
+}
+
 // --- immagini: cerca sul web, scontorna, metti nel video (pannello Immagini) ------------
 // Solo l'utente mette le immagini: Claude non le inserisce mai da solo.
 
@@ -2459,6 +3217,163 @@ function imgJobLine(j) {
         ${j.status === "error" ? "" : `<div class="img-bar"><i style="width:${pct ?? 35}%" class="${pct == null ? "indef" : ""}"></i></div>`}</div>
       ${j.status === "error" ? `<button class="icon-btn" data-img-act="drop-job" data-v="${esc(j.id)}" title="Chiudi">✕</button>` : ""}
     </div>`;
+}
+
+// --- Genera con Higgsfield: effetti AI dentro la ripresa vera (skill higgsfield-vfx) ----
+// La clip AI sostituisce il video per quei secondi; la voce resta l'originale.
+const vfxData = () => S.data?.vfx ?? { shots: [], max_ms: 3000, qualities: {}, ref_credits: 0 };
+const VFX_SPARK = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3 1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/></svg>`;
+const vfxSec = (ms) => `${(ms / 1000).toFixed(1).replace(".", ",")} s`;
+
+function vfxForm() {
+  S.vfx ??= { dur: 3000, protect: true, quality: "draft", text: "", at: null, sel: null };
+  return S.vfx;
+}
+
+function vfxCard(s) {
+  const f = vfxForm();
+  const span = `${clock(s.start_ms)} → ${clock(s.start_ms + s.dur_ms)}`;
+  const credits = (s.credits ? ` · ${String(s.credits).replace(".", ",")} crediti` : "") + (s.usd ? ` · ${String(s.usd).replace(".", ",")} $ API` : "");
+  let body = "";
+  if (s.status === "running") {
+    body = `<div class="vfx-run"><i></i><span><b>${esc(s.phase_label)}…</b></span></div>`;
+  } else if (s.status === "error") {
+    body = `<div><span class="vfx-badge error">Non riuscita</span></div><div class="tx-hint err">${esc(s.error)}</div>`;
+  } else {
+    const rv = s.review ?? {};
+    const badge = { ok: ["ok", "Revisione: ok"], retry: ["retry", "Da correggere"], fail: ["fail", "Non va bene"] }[rv.verdict] ?? ["q", "Senza revisione"];
+    body = `${s.final_url ? `<video src="${esc(s.final_url)}" controls loop muted playsinline preload="metadata"></video>` : ""}
+      <div><span class="vfx-badge ${badge[0]}">${badge[1]}</span></div>
+      ${(rv.issues ?? []).length ? `<ul class="vfx-issues">${rv.issues.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+      ${s.sheet_url ? `<details><summary class="meta">Prima / dopo</summary><a href="${esc(s.sheet_url)}" target="_blank"><img class="vfx-sheet" src="${esc(s.sheet_url)}" alt="prima e dopo"></a></details>` : ""}`;
+  }
+  const risk = s.plan?.risk ? `<div class="vfx-risk">⚠ ${esc(s.plan.risk)}</div>` : "";
+  const protect = s.plan && "protect_person" in s.plan ? s.plan.protect_person : s.protect;
+  const fid = s.plan?.fidelity ? ` (fedeltà ${String(s.plan.fidelity.median).replace(".", ",")})` : "";
+  const mode = s.plan?.mode === "direct" ? ` · clip AI diretta${fid}` : s.plan?.mode === "protected" ? ` · persona vera rimessa sopra${fid}` : "";
+  const cost = vfxData().qualities[s.quality]?.credits ?? 4;
+  const acts = s.status === "running" ? "" : `<div class="acts">
+      ${s.final_url ? `<button class="btn ${s.enabled ? "" : "vfx-go"}" data-vfx="${s.enabled ? "off" : "on"}" data-id="${esc(s.id)}">${s.enabled ? "Togli dalla timeline" : "⬇ Metti in timeline"}</button>` : ""}
+      <button class="btn" data-vfx="seek" data-id="${esc(s.id)}">Vai al punto</button>
+      ${s.review?.fix_prompt ? `<button class="btn" data-vfx="fix" data-id="${esc(s.id)}" title="Rigenera con il prompt corretto da Claude">Rigenera corretta · ${cost} cr.</button>` : ""}
+      <button class="btn" data-vfx="again" data-id="${esc(s.id)}" title="Stesso prompt, nuova versione">Rigenera · ${cost} cr.</button>
+      <button class="btn" data-vfx="del" data-id="${esc(s.id)}">Elimina</button>
+    </div>`;
+  return `<div class="vfx-card${f.sel === s.id ? " sel" : ""}" data-card="${esc(s.id)}">
+    <div class="top"><b>${esc(s.title || s.request.slice(0, 48))}</b><span class="meta">${span}</span></div>
+    <div class="meta">«${esc(s.request.slice(0, 160))}» · ${protect ? "persona protetta" : "persona NON protetta"}${mode}${credits}${s.attempt > 1 ? ` · tentativo ${s.attempt}` : ""}</div>
+    ${body}${risk}${acts}</div>`;
+}
+
+function vfxPanelHTML() {
+  const v = vfxData();
+  const f = vfxForm();
+  const at = f.at ?? nowMs();
+  const running = v.shots.some((s) => s.status === "running");
+  const q = v.qualities[f.quality] ?? { credits: 4 };
+  const opts = Object.entries(v.qualities).map(([k, x]) =>
+    `<option value="${k}"${k === f.quality ? " selected" : ""}>${esc(x.label)}${x.usd ? "" : ` · ${x.credits} crediti`}</option>`).join("");
+  const list = v.shots.slice().reverse().map(vfxCard).join("");
+  return `<div class="vfx-panel">
+    <h4>${VFX_SPARK}<span>Genera con <b>Higgsfield</b></span></h4>
+    <p class="tx-hint">Scrivi cosa vuoi vedere in questo punto: l'AI lo aggiunge alla tua ripresa vera, poi la clip si allinea al fotogramma e prende i colori del video. Volto e voce restano i tuoi.</p>
+    <div class="vfx-at"><span>Parte da <b>${clock(at)}</b>${f.at === null ? " (testina)" : ""}</span>
+      <button class="btn" data-vfx="here">Usa la testina</button></div>
+    <label class="vfx-row">Durata <input type="range" id="vfx-dur" min="500" max="${v.max_ms}" step="100" value="${f.dur}"><b>${vfxSec(f.dur)}</b></label>
+    <textarea id="vfx-text" maxlength="1200" placeholder="es. dietro di me compare un dragone cinese realistico che sputa fuoco verso l'alto e poi scompare">${esc(f.text)}</textarea>
+    <label class="vfx-chk"><input type="checkbox" id="vfx-protect"${f.protect ? " checked" : ""}><span><b>Proteggi la persona</b><br><span class="tx-hint">Il tuo corpo vero viene rimesso sopra la clip AI: volto e bocca restano al 100% tuoi. Spegnila solo se l'effetto deve toccarti (fuoco in testa, cambio vestiti).</span></span></label>
+    <label class="vfx-row">Qualità <select id="vfx-quality">${opts}</select><span></span></label>
+    <button class="btn vfx-go" data-vfx="go"${running ? " disabled" : ""}>${VFX_SPARK} ${running ? "Sto generando…" : `Genera · ${q.usd ? `circa ${String(q.usd).replace(".", ",")} $` : `circa ${q.credits} crediti`}`}</button>
+    <p class="tx-hint">Claude scrive il prompt con la skill higgsfield-vfx, controlla il costo prima di spendere e rivede il risultato. In 1080p/4K la persona di Seedance resta fedele e la clip si usa così com'è; se ti ha cambiato, rimette te. Poi decidi tu se metterlo in timeline.</p>
+    <div class="vfx-list">${list || `<div class="tx-hint">Nessuna clip AI ancora.</div>`}</div>
+  </div>`;
+}
+
+function openVfx(id) {
+  const f = vfxForm();
+  f.sel = id;
+  if (S.viewer) toggleViewerPanel(true, "vfx");
+  else if (S.leftTab !== "vfx") { S.leftTab = "vfx"; renderLeft(); }
+  else renderTextPanels();
+  renderVfxTrack();
+  requestAnimationFrame(() => document.querySelector(`.vfx-card[data-card="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" }));
+}
+
+function wireVfxPanel(box) {
+  box.addEventListener("input", (e) => {
+    const f = vfxForm();
+    if (e.target.id === "vfx-text") f.text = e.target.value;
+    else if (e.target.id === "vfx-dur") {
+      f.dur = Number(e.target.value);
+      const b = e.target.parentElement.querySelector("b");
+      if (b) b.textContent = vfxSec(f.dur);
+    }
+  });
+  box.addEventListener("change", (e) => {
+    const f = vfxForm();
+    if (e.target.id === "vfx-protect") f.protect = e.target.checked;
+    else if (e.target.id === "vfx-quality") { f.quality = e.target.value; renderTextPanels(); }
+  });
+  box.addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-vfx]");
+    if (!b || !box.contains(b)) return;
+    const f = vfxForm();
+    const id = b.dataset.id;
+    const shot = vfxData().shots.find((s) => s.id === id);
+    switch (b.dataset.vfx) {
+      case "here": f.at = nowMs(); renderTextPanels(); break;
+      case "go": {
+        if (!f.text.trim()) { toast("Scrivi cosa vuoi vedere nel video", true); return; }
+        const qc = vfxData().qualities[f.quality]?.credits ?? 4;
+        const qu = vfxData().qualities[f.quality]?.usd ?? 0;
+        if (qc >= 20 && !confirm(`Questa generazione costa circa ${qc} crediti Higgsfield. Procedo?`)) return;
+        if (qu > 0 && !confirm(`Questa generazione usa l'API a consumo: circa ${String(qu).replace(".", ",")} $. Procedo?`)) return;
+        const body = { start_ms: Math.round(f.at ?? nowMs()), dur_ms: f.dur, request: f.text.trim(), protect: f.protect, quality: f.quality };
+        const ok = await mutate("/api/vfx", body, "Generazione avviata: ci vuole qualche minuto");
+        if (ok) { f.text = ""; f.at = null; renderTextPanels(); }
+        break;
+      }
+      case "on": await mutate(`/api/vfx/${id}/enable`, { enabled: true }, "Clip AI nella timeline"); break;
+      case "off": await mutate(`/api/vfx/${id}/enable`, { enabled: false }, "Clip AI tolta dalla timeline"); break;
+      case "seek": if (shot) { seekMs(shot.start_ms); f.sel = id; renderVfxTrack(); renderTextPanels(); } break;
+      case "fix": await mutate(`/api/vfx/${id}/retry`, { use_fix: true }, "Rigenero con la correzione"); break;
+      case "again": await mutate(`/api/vfx/${id}/retry`, { use_fix: false }, "Rigenero una nuova versione"); break;
+      case "del":
+        if (confirm("Eliminare questa clip AI? I file generati vengono cancellati.")) await mutate(`/api/vfx/${id}/delete`, {}, "Clip AI eliminata");
+        break;
+    }
+  });
+}
+
+function renderVfxTrack() {
+  const el = $("#track-vfx");
+  if (!el) return;
+  const f = vfxForm();
+  el.innerHTML = vfxData().shots.map((s) => {
+    const cls = ["vfx-blk", s.status === "running" ? "running" : s.status === "error" ? "error" : s.enabled ? "" : "off", f.sel === s.id ? "sel" : ""].join(" ");
+    const w = Math.max(14, (s.dur_ms / 1000) * S.pps);
+    const state = s.status === "running" ? s.phase_label : s.status === "error" ? "non riuscita" : s.enabled ? "nella timeline" : "pronta, non in timeline";
+    return `<div class="${cls}" data-vfxblk="${esc(s.id)}" style="left:${xOf(s.start_ms)}px;width:${w}px" title="${esc(`${s.title || s.request} · ${state}`)}">✦<span>${w > 50 ? esc(s.title || "AI") : ""}</span></div>`;
+  }).join("");
+}
+
+// Anteprima: nei secondi di una clip attiva si vede la clip AI sopra il video (stesso zoom e colore).
+function updateVfxOverlay(cur) {
+  const el = $("#vfx-video");
+  if (!el) return;
+  const s = (S.data?.vfx?.shots ?? []).find((x) => x.enabled && x.final_url && cur >= x.start_ms && cur < x.start_ms + x.dur_ms);
+  if (!s) {
+    if (el.classList.contains("on")) { el.classList.remove("on"); el.pause(); }
+    return;
+  }
+  if (el.dataset.src !== s.final_url) { el.dataset.src = s.final_url; el.src = s.final_url; }
+  el.classList.add("on");
+  const t = (cur - s.start_ms) / 1000;
+  if (Math.abs(el.currentTime - t) > (video.paused ? 0.02 : 0.15)) el.currentTime = t;
+  if (video.paused && !el.paused) el.pause();
+  else if (!video.paused && el.paused) el.play().catch(() => {});
+  if (el.style.transform !== video.style.transform) el.style.transform = video.style.transform;
+  if (el.style.filter !== video.style.filter) el.style.filter = video.style.filter;
 }
 
 function imagesPanelHTML() {
@@ -2537,6 +3452,8 @@ async function imgSearch(q) {
     S.imgShown = data.query;
   } catch (e) {
     S.imgErr = `Ricerca non riuscita: ${e.message}`;
+    S.imgRes = []; // niente risultati vecchi spacciati per nuovi
+    S.imgShown = "";
   } finally {
     S.imgBusy = false;
     renderTextPanels();
@@ -2727,18 +3644,27 @@ function updateCaptionFx(cur) {
   const chunk = S.chunks[S.lastChunk];
   if (!S.look || !chunk) { applyCss(capEl, { opacity: 1, transform: "none", filter: "none", clipPath: "none" }); return; }
   const spec = captionSpec();
-  const t = cur - chunk.start;
   const dur = chunk.end + 250 - chunk.start;
+  const t = restT(cur - chunk.start, spec, dur);
   const perWord = spec.in.type === "words_blur" || spec.in.type === "words_pop";
   const st = animState({ inSpec: perWord ? null : spec.in, outSpec: spec.out, t, dur });
   applyCss(capEl, animCss(st, chunkCaps(chunk)?.emphasis?.color ?? "#FFFFFF"));
   const words = capEl.querySelectorAll(".cw");
   if (perWord) {
     const times = chunkWordTimes(chunk, words.length);
-    words.forEach((w, i) => applyCss(w, animCss(wordState(spec.in.type, cur - times[i], spec.in.ms))));
+    words.forEach((w, i) => applyCss(w, animCss(wordState(spec.in.type, video.paused ? spec.in.ms : cur - times[i], spec.in.ms))));
   } else if (words.length && words[0].style.opacity) {
     words.forEach((w) => applyCss(w, { opacity: 1, transform: "none", filter: "none", clipPath: "none" }));
   }
+}
+
+// In pausa si sta modificando: l'elemento si vede intero (fuori da entrata e uscita).
+// In riproduzione fa l'animazione vera, come nel render.
+function restT(t, spec, dur) {
+  if (!video.paused) return t;
+  const a = spec.in && spec.in.type !== "none" ? spec.in.ms : 0;
+  const b = spec.out && spec.out.type !== "none" ? spec.out.ms : 0;
+  return Math.max(a, Math.min(t, dur - b - 1));
 }
 
 function updatePopupFx(cur) {
@@ -2746,7 +3672,8 @@ function updatePopupFx(cur) {
     const p = popItem(el.dataset.id);
     const spec = p && stickerSpec(p.id);
     if (!spec || S.popLive?.id === p.id) return;
-    const st = animState({ inSpec: spec.in, outSpec: spec.out, loopSpec: spec.loop, t: cur - p.at_ms, dur: p.duration_ms });
+    const t = restT(cur - p.at_ms, spec, p.duration_ms);
+    const st = animState({ inSpec: spec.in, outSpec: spec.out, loopSpec: spec.loop, t, dur: p.duration_ms });
     applyCss(el, animCss(st));
   });
 }
@@ -3037,7 +3964,7 @@ function selectPoint(id) {
   const pt = S.data.effects.points.find((x) => x.id === id);
   if (pt) { video.pause(); seekMs(prevKept(pt.at_ms, 300)); }
   if (S.viewer) toggleViewerPanel(true, "effects");
-  else if (S.leftTab !== "effects") { S.leftTab = "effects"; renderLeft(); }
+  else if (S.leftTab !== "effects" && S.leftTab !== "transitions") { S.leftTab = "effects"; renderLeft(); }
   else renderTextPanels();
   renderTransitionMarks();
 }

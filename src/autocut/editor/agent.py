@@ -239,6 +239,16 @@ class ClaudeAgent:
             self._status = (time.time(), result)
             return result
 
+    def start_login(self) -> None:
+        """Apre `higgsfield auth login` (login nel browser) in una finestra a parte."""
+        hf = self.higgsfield_executable()
+        if hf is None:
+            raise AgentError("CLI Higgsfield non trovata: npm i -g @higgsfield/cli")
+        flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        subprocess.Popen([hf, "auth", "login"], env=child_env(), creationflags=flags)  # noqa: S603
+        with self._lock:
+            self._status = None  # al prossimo controllo si rilegge lo stato
+
     def _run(self, prompt: str, tools: list[str], timeout: int) -> dict[str, Any]:
         exe = self.executable()
         if exe is None:
@@ -290,6 +300,11 @@ class ClaudeAgent:
         """Domanda testuale (pop-up: analisi del parlato e chat). Nessuno strumento che
         modifichi o generi: la risposta è solo un JSON di operazioni da applicare."""
         return self._run(prompt, ["Read"], SUGGEST_TIMEOUT_S)
+
+    def ask_skill(self, prompt: str) -> dict[str, Any]:
+        """Come ask_json ma con le skill del progetto (es. higgsfield-vfx): legge e risponde,
+        non genera e non lancia comandi."""
+        return self._run(prompt, ["Read", "Skill"], SUGGEST_TIMEOUT_S)
 
     def generate(self, ctx: FrameContext, kind: str, request: str) -> dict[str, Any]:
         tools = ["Read", "Skill", "Bash(higgsfield:*)", "Bash(hf:*)"]

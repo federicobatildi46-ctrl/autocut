@@ -80,7 +80,7 @@ const caseText = (t: string, c: string) => (c === "upper" ? t.toUpperCase() : c 
 const ease = Easing.bezier(0.22, 1, 0.36, 1);
 
 // Testo con bordo spesso "alla CapCut": un livello col contorno sotto e il riempimento sopra.
-const Stroked: React.FC<{ text: string; color: string; stroke: number; strokeColor: string; style: React.CSSProperties }> = ({ text, color, stroke, strokeColor, style }) => (
+export const Stroked: React.FC<{ text: string; color: string; stroke: number; strokeColor: string; style: React.CSSProperties }> = ({ text, color, stroke, strokeColor, style }) => (
   <span style={{ position: "relative", display: "inline-block", ...style }}>
     {stroke > 0 && (
       <span aria-hidden style={{ position: "absolute", inset: 0, WebkitTextStroke: `${stroke * 2}px ${strokeColor}`, color: strokeColor, strokeLinejoin: "round" }}>{text}</span>
@@ -91,7 +91,7 @@ const Stroked: React.FC<{ text: string; color: string; stroke: number; strokeCol
 
 // Larghezza reale del testo (font già caricati): serve per far stare la riga grande su una riga.
 let measureCtx: CanvasRenderingContext2D | null = null;
-function fitSize(text: string, family: string, weight: number, italic: boolean, size: number, maxWidth: number, extra = 0): number {
+export function fitSize(text: string, family: string, weight: number, italic: boolean, size: number, maxWidth: number, extra = 0): number {
   measureCtx ??= document.createElement("canvas").getContext("2d");
   if (!measureCtx) return size;
   measureCtx.font = `${italic ? "italic " : ""}${weight} ${size}px "${family}"`;
@@ -99,7 +99,7 @@ function fitSize(text: string, family: string, weight: number, italic: boolean, 
   return w > maxWidth ? (size * maxWidth) / w : size;
 }
 
-function useFonts(url: string | null, families: string[]): boolean {
+export function useFonts(url: string | null, families: string[]): boolean {
   const [handle] = useState(() => delayRender("font del brand/stile"));
   const [ready, setReady] = useState(false);
   useEffect(() => {

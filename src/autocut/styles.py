@@ -41,6 +41,8 @@ class Grade(_Model):
     brightness: float = Field(default=1.0, ge=0.6, le=1.4)
     warmth: float = Field(default=0.0, ge=0.0, le=0.4, description="quota di seppia")
     vignette: float = Field(default=0.0, ge=0.0, le=1.0)
+    hue: float = Field(default=0.0, ge=-40, le=40, description="rotazione della tinta (gradi)")
+    grayscale: float = Field(default=0.0, ge=0.0, le=1.0)
 
     def css_filter(self) -> str:
         parts = [
@@ -50,6 +52,10 @@ class Grade(_Model):
         ]
         if self.warmth:
             parts.append(f"sepia({self.warmth:g})")
+        if self.hue:
+            parts.append(f"hue-rotate({self.hue:g}deg)")
+        if self.grayscale:
+            parts.append(f"grayscale({self.grayscale:g})")
         return " ".join(parts)
 
 

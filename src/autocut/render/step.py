@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import effects, text_style
+from .. import audio_mix, effects, filters, manual_cuts, text_style
 from ..brands import list_brands
 from ..ingest.fingerprint import fingerprint
 from ..models.io import read_model
@@ -18,6 +18,7 @@ from ..paths import TIMELINE_FILE, project_dir
 from ..styles import list_styles, resolve_look
 from .preview import (
     RenderError,
+    _catalog,
     build_props,
     ensure_masks,
     ensure_source,
@@ -80,6 +81,8 @@ def run_style_preview(
     look = resolve_look(style, brand, portrait=v.display_height >= v.display_width)
     text = text_style.for_style(text_style.load(pdir), sid)  # scelte del pannello Testo
     look = text_style.apply_to_look(look, text)
+    # colore del pannello Filtri
+    look = filters.apply_to_look(look, filters.for_style(filters.load(pdir), sid))
 
     cam = tl.sources.camera
     src = Path(cam.path_hint) if cam.path_hint else None
@@ -92,7 +95,7 @@ def run_style_preview(
     end = min(cam.duration_ms, at_ms + after_ms)
     ov = store.load(pdir, tl)
     ov, _, _ = store.reconcile(ov, tl)
-    eff = effective_ranges(tl, ov)
+    eff = manual_cuts.apply(effective_ranges(tl, ov), manual_cuts.load(pdir))  # + tagli a mano
 
     work = pdir / "work"
     # effetti del pannello Effetti e punti di transizione (tagli / cambi di scena)
@@ -102,10 +105,26 @@ def run_style_preview(
     fx_points = effects.boundaries(
         tl, eff, video=proxy, offset_ms=rng.start_ms if rng else 0, cache_path=work / "scenes.json"
     )
+    # suoni e volumi del pannello Audio: stesso piano dell'editor, calcolato su tutto il video
+    hook_text = hook if hook is not None else state.get("hook")
+    mix = audio_mix.for_style(audio_mix.load(pdir), sid)
+    catalog = _catalog()
+    plan = audio_mix.auto_plan(
+        end_ms=max((r.end_ms for r in eff), default=0), project_dir=pdir, tl=tl, eff=eff,
+        look=look, hook_text=hook_text, catalog=catalog, loudness=sfx_loudness,
+        scenes=text.scenes, effects=fx_res, points=fx_points,
+    )  # fmt: skip
+    sounds_raw = audio_mix.resolve(plan, mix, look, catalog, sfx_loudness)
     gain = voice_gain_db(work, tl, src, look["sound"]["voice_lufs"])
+    gain = round(gain + audio_mix.voice_offset_db(mix), 1)
     span = f"{start / 1000:.1f}-{end / 1000:.1f} s"
     log(f"estratto {span} dal raw (solo lettura), voce {gain:+.1f} dB...")
     source = ensure_source(work, tl, src, start, end, gain_db=gain)
+    from .. import vfx  # clip AI di «Genera con Higgsfield» attive: cucite dentro l'estratto
+
+    if vfx.active(pdir):
+        log("clip AI (Genera con Higgsfield) dentro il video...")
+        source = vfx.bake(pdir, source, start, end)
     props, pieces = build_props(
         project_dir=pdir,
         tl=tl,
@@ -113,11 +132,12 @@ def run_style_preview(
         look=look,
         window=(start, end),
         source_rel=source.relative_to(work).as_posix(),
-        hook_text=hook if hook is not None else state.get("hook"),
+        hook_text=hook_text,
         loudness=sfx_loudness,
         scenes=text.scenes,
         effects=fx_res,
         points=fx_points,
+        sounds_raw=sounds_raw,
     )
     stage_sounds(props["sounds"], work)
     if any(c.get("layer") == "person" for c in props["cards"]):

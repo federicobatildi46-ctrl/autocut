@@ -42,7 +42,7 @@ def build(
     if fingerprint(src) != cam.fingerprint:
         raise EditorError(f"{cam.file_name} è cambiato dall'ingest: rilancia ingest")
     media = prepare(pdir, tl, src, log=log)
-    return create_app(pdir, media, auto_popups=True), pdir
+    return create_app(pdir, media, auto_popups=True, keepalive=True), pdir
 
 
 def port_busy(port: int) -> bool:

@@ -53,7 +53,10 @@ UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/130.0 Safari/537.36"
 )
-COMMONS_UA = "autocut-editor/0.1 (editor video locale, uso personale)"
+# Wikimedia vuole nome del programma e un contatto (il repository), altrimenti risponde 403
+COMMONS_UA = (
+    "autocut-editor/0.1 (https://github.com/federicobatildi46-ctrl/autocut; editor locale) httpx"
+)
 
 Progress = Callable[[str, float | None], None]  # (fase, 0..1 o None)
 

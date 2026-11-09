@@ -77,6 +77,14 @@ def to_out(pieces: list[Piece], ms: int) -> int | None:
     return None
 
 
+def to_raw(pieces: list[Piece], ms: int) -> int:
+    """Il contrario di to_out: istante del montato → istante del raw."""
+    for p in pieces:
+        if p.out_start <= ms < p.out_end:
+            return p.src_start + ms - p.out_start
+    return pieces[-1].src_end if pieces else ms
+
+
 def _ff(cmd: list[str], what: str) -> None:
     proc = subprocess.run(cmd, capture_output=True, check=False)
     if proc.returncode != 0:
@@ -284,6 +292,46 @@ def _snap(ms: int, fps: int = FPS) -> int:
     return round(round(ms * fps / 1000) * 1000 / fps)
 
 
+def sound_gain_db(
+    look: dict[str, Any],
+    s: dict[str, Any],
+    loudness: Callable[[dict[str, Any]], float | None] = lambda s: None,
+) -> float:
+    """Guadagno di un suono della libreria rispetto alla voce normalizzata (vedi plan_sounds)."""
+    snd = look["sound"]
+    family = s.get("family", "textures")
+    target = snd.get("voice_lufs", -14.0) + snd.get("relative_db", {}).get(family, -18.0)
+    measured = loudness(s)
+    # senza misura: il livello del catalogo, abbassato di 12 dB (prudente)
+    return target - measured if measured is not None else float(s["level_db"]) - 12
+
+
+def window_sounds(sounds_raw: list[dict[str, Any]], pieces: list[Piece]) -> list[dict[str, Any]]:
+    """Suoni già decisi sul raw (pannello Audio) → tempi della finestra renderizzata.
+    Quelli muti o finiti in una parte tagliata non suonano."""
+    out = []
+    for s in sounds_raw:
+        if s.get("muted"):
+            continue
+        at = to_out(pieces, s["at_ms"])
+        if at is None:
+            continue
+        at = _snap(at)
+        out.append(
+            {
+                "type": s["type"],
+                "file": s["file"],
+                "kind": s.get("kind", "user"),
+                "reason": s.get("reason", ""),
+                "event_ms": at,
+                "from_ms": max(0, at - int(s.get("lead_ms", 0))),
+                "gain_db": round(s["gain_db"], 1),
+                "volume": round(min(1.0, 10 ** (s["gain_db"] / 20)), 4),
+            }
+        )
+    return out
+
+
 def plan_sounds(
     look: dict[str, Any],
     events: list[SoundEvent],
@@ -321,11 +369,7 @@ def plan_sounds(
         n = used.get(sfx, 0)
         used[sfx] = n + 1
         s = variants[n % len(variants)]
-        family = s.get("family", "textures")
-        target = snd.get("voice_lufs", -14.0) + snd.get("relative_db", {}).get(family, -18.0)
-        measured = loudness(s)
-        # senza misura: il livello del catalogo, abbassato di 12 dB (prudente)
-        gain_db = target - measured if measured is not None else float(s["level_db"]) - 12
+        gain_db = sound_gain_db(look, s, loudness)
         at = _snap(ev.at_ms)
         out.append(
             {
@@ -515,9 +559,11 @@ def build_props(
     scenes: dict[str, Any] | None = None,
     effects: dict[str, Any] | None = None,
     points: list[dict[str, Any]] | None = None,
+    sounds_raw: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[Piece]]:
     """``scenes``: modifiche del pannello Testo per frase (text_style.SceneEdit per id parola).
-    ``effects``: effetti risolti (effects.resolved); ``points``: tagli e cambi di scena."""
+    ``effects``: effetti risolti (effects.resolved); ``points``: tagli e cambi di scena.
+    ``sounds_raw``: suoni già decisi sul raw (pannello Audio); senza, li sceglie lo stile."""
     start, end = window
     pieces = pieces_in_window(eff, start, end)
     effects = effects or fx.resolved(look.get("style"), fx.StyleEffects())
@@ -575,12 +621,15 @@ def build_props(
         if start == 0:
             shift = max(0, hook_end + 200 - a)
             lower_third = {**lt, "from_ms": a + shift, "to_ms": b + shift}
-    sounds = plan_sounds(
-        look,
-        sound_events(look, hook, captions, cards, pieces),
-        catalog if catalog is not None else _catalog(),
-        loudness=loudness,
-    )
+    if sounds_raw is not None:
+        sounds = window_sounds(sounds_raw, pieces)
+    else:
+        sounds = plan_sounds(
+            look,
+            sound_events(look, hook, captions, cards, pieces),
+            catalog if catalog is not None else _catalog(),
+            loudness=loudness,
+        )
     for card in cards:
         card["anim"] = fx.sticker_anim(effects, card["id"])
     look = {**look, "captions": {**look["captions"], "anim": effects["captions"]}}
@@ -658,7 +707,13 @@ def _npx() -> str:
 
 
 def run_remotion(
-    props: dict[str, Any], props_path: Path, out: Path, public_dir: Path, *, frame: int | None
+    props: dict[str, Any],
+    props_path: Path,
+    out: Path,
+    public_dir: Path,
+    *,
+    frame: int | None,
+    composition: str = COMPOSITION,
 ) -> Path:
     if not (MOTION_DIR / "node_modules").is_dir():
         raise RenderError("Remotion non installato: cd motion && npm install")
@@ -667,13 +722,13 @@ def run_remotion(
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [_npx(), "remotion"]
     cmd += (
-        ["still", "src/index.ts", COMPOSITION, str(out), f"--frame={frame}"]
+        ["still", "src/index.ts", composition, str(out), f"--frame={frame}"]
         if frame is not None
         # poca concorrenza: con troppi worker l'estrazione dei fotogrammi va in timeout
         else [
             "render",
             "src/index.ts",
-            COMPOSITION,
+            composition,
             str(out),
             "--codec=h264",
             "--crf=18",
@@ -716,6 +771,9 @@ __all__ = [
     "ensure_source",
     "pieces_in_window",
     "plan_sounds",
+    "sound_gain_db",
+    "to_raw",
+    "window_sounds",
     "run_remotion",
     "stage_sounds",
     "to_out",

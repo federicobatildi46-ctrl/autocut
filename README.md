@@ -95,6 +95,68 @@ per categorie) estratte dal font Apple Color Emoji a 96 px, usate in editor e re
 del font Noto. **Sono disegni di Apple: solo per uso personale, non nei video dei clienti.**
 Per ricrearle su un altro PC vedi `tools/extract_emoji.py`; senza la cartella si torna al font.
 
+### Timeline: testo, tagli, Annulla / Ripeti
+
+- **Clic su una frase** (blocchi rossi in alto): si apre il pannello Testo su quella scena con il
+  testo già selezionato; scrivi e premi Invio. Le frasi modificate hanno ✎ e la timeline mostra
+  il testo nuovo.
+- **Dividi** (forbice nella barra, o Ctrl+B) alla testina; clicca un pezzo e **Togli** (Canc).
+  Un pezzo tolto da te è arancione: cliccalo e *Ripristina*. Clic su una linea di divisione
+  per toglierla. Sta in `projects/<nome>/cuts.json`, sopra le scelte del motore (che restano).
+- **Annulla / Ripeti** (in alto e nella barra; Ctrl+Z, Ctrl+Y o Ctrl+Maiusc+Z) valgono per
+  tutto: tagli, testo, sticker, immagini, effetti, audio e stile. `overrides.json` resta
+  append-only (l'annulla aggiunge voci, non riscrive). Le pile durano finché l'editor è acceso.
+
+### Pannello Audio
+
+Scheda **Audio** a sinistra (e pulsante *Audio* nello schermo intero) e **traccia audio** sotto il
+video nella timeline, con i suoni che lo stile mette da solo (pop sugli sticker, whoosh sui
+cambi di blocco…) e quelli aggiunti da te.
+- **Voce**: volume rispetto al livello già normalizzato del render, o muta.
+- **Effetti sonori**: volume di tutti insieme, o tutti muti.
+- **Ogni suono**: clic nella traccia (o nella lista) → ascolta, volume, muto, *Cambia suono*,
+  *Sposta qui*, ◀ ▶ di 0,1 s, oppure trascinalo nella traccia. Canc lo mette muto (o elimina
+  quelli aggiunti da te).
+- **Aggiungi un suono alla testina** dalla libreria `library/sfx`, con anteprima ▶.
+
+Nell'anteprima dell'editor senti voce ed effetti con gli stessi livelli del render. Le scelte
+stanno in `projects/<nome>/audio.json` (per stile); il render usa lo stesso elenco di suoni.
+
+### Esporta: copertine Shorts e YouTube
+
+Il tasto **Esporta** in alto apre l'anteprima delle copertine: **Shorts 9:16** (nel telefono) e
+**YouTube 16:9** (come appare nel feed, con titolo, canale, durata e miniatura piccola).
+- **Persona**: nome, Soul ID del personaggio allenato su Higgsfield (tuo o del cliente) e foto
+  frontale del volto, che tiene la stessa identità.
+- **Di cosa parla il video** → *Proponi con Claude*: frase (riga piccola + scritta grande) e
+  sfondo legati al tema. Tutto si corregge a mano.
+- **Genera / Rigenera**: Soul 2 mette la persona nella scena con luce da copertina, poi GPT
+  Image 2 impagina scritta e sfondo in 4K (~11 crediti, parte solo dopo *Conferma*). Ogni
+  versione resta: clicca una miniatura per sceglierla, *Scarica* per il PNG.
+- Serve la CLI Higgsfield collegata: lo stato è in alto nella finestra, con **Ricollega** se
+  la sessione è scaduta (l'editor acceso la rinnova da solo ogni 20 minuti).
+- **Stile Viral**: solo la copertina verticale, gratis e in locale (Remotion, ~10 s): un
+  fotogramma del video (l'apertura o quello della testina) + la frase d'esordio al centro con
+  il font, il contorno e l'ombra dell'apertura del video, riga piccola nel colore scelto, 0-2
+  emoji iPhone ai lati. Claude propone la frase senza inventare fatti.
+- File in `projects/<nome>/covers.json` e `work/covers/`.
+
+### Pannelli Filtri e Transizioni
+
+- **Filtri**: il colore del video sopra il look dello stile. Preset (Naturale, Vivido, Caldo,
+  Freddo, Cinema, Pastello, Bianco e nero) con anteprima sul fotogramma, e cursori per
+  luminosità, contrasto, saturazione, calore, tinta e vignetta. Vale nell'anteprima, nel render
+  e nella copertina Viral; per stile, in `projects/<nome>/filters.json`.
+- **Transizioni**: le giunte tra le clip con la loro transizione (lo stesso motore del pannello
+  Effetti), anche dal rombo nella timeline.
+
+### Esporta video
+
+Nella finestra **Esporta**, *Esporta video* fa il render del video intero con tutto quello che
+hai fatto (tagli, testo, sticker, immagini, effetti, audio, filtri) e mette la copertina scelta
+dentro il file MP4 come miniatura. Qualche minuto per un minuto di video; il file finisce in
+`projects/<nome>/renders/<nome>-<stile>-finale-<data>.mp4` e si scarica dalla finestra.
+
 ### Pannello Immagini
 
 Scheda **Immagini** a sinistra (e pulsante *Immagini* nello schermo intero): scrivi chi o cosa
@@ -114,6 +176,30 @@ l'utente: Claude non le inserisce mai da solo.
 
 Le foto del web hanno quasi sempre un copyright: per i video da pubblicare preferisci
 *Licenza libera* o foto tue.
+
+### Genera AI (Genera con Higgsfield)
+
+Scheda **Genera AI** a sinistra (e pulsante *Genera AI* nello schermo intero): metti la testina
+nel punto giusto, scegli la durata (max 3 s), scrivi cosa vuoi vedere («dietro di me compare un
+dragone che sputa fuoco») e premi *Genera*. L'AI modifica **la tua ripresa vera**, non la
+reinventa da un fotogramma:
+1. l'editor prende quei secondi dal raw (4 s, il minimo di Seedance);
+2. Claude con la skill `higgsfield-vfx` (`.claude/skills/higgsfield-vfx/`) guarda il frame e
+   scrive il prompt video-to-video (scena, ruoli dei riferimenti, azioni coi secondi, blocchi su
+   volto/voce/camera); se serve genera prima un'immagine di riferimento (Soul 2.0, 0,12 crediti);
+3. Seedance 2.0 a 480p con **audio spento**: prima stima i crediti, sopra i 6 non genera;
+4. in locale: allineamento al fotogramma, colori presi dal video, **persona vera rimessa sopra**
+   se *Proteggi la persona* è attivo (volto e bocca restano al 100% tuoi): sagoma con Robust
+   Video Matting (modello ~15 MB scaricato la prima volta in `library/models/`, licenza
+   GPL-3.0, uso locale), ricostruzione della scena AI nella striscia dove l'AI ti aveva
+   disegnato più largo (niente alone), luce della scena sul tuo bordo; la clip si allunga da
+   sola fino a dove l'effetto finisce davvero (max 4 s), poi dissolvenza;
+5. Claude rivede il prima/dopo (ok / da correggere con prompt corretto / non va bene).
+
+Poi *Metti in timeline*: la clip compare nella traccia ✦, si vede nell'anteprima e il render la
+cuce dentro il video (la voce è sempre l'originale). *Rigenera corretta* usa il prompt sistemato
+da Claude. Costo tipico: ~4 crediti a tentativo (*Economica*: ~2). Studio e regole in
+`knowledge/higgsfield-vfx.md`. File in `projects/<nome>/vfx.json` e `work/vfx/<id>/`.
 
 ### Pannello Effetti
 

@@ -26,6 +26,7 @@ raw/
 .agents/
 .claude/skills/*
 !.claude/skills/autocut-*/
+!.claude/skills/higgsfield-vfx/
 
 # Libreria condivisa di suoni/asset: solo il README è versionato
 library/*
@@ -46,3 +47,4 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+.env.local

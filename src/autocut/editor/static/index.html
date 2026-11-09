@@ -27,10 +27,13 @@
         <select id="style-select"><option value="">Nessuno</option></select>
       </label>
       <span class="save-state" id="save-state">Salvato</span>
-      <button class="btn ghost" id="btn-undo-top" title="Annulla l'ultima scelta (Ctrl+Z)">
+      <button class="btn ghost" id="btn-undo-top" title="Annulla (Ctrl+Z): tagli, testo, sticker, immagini, effetti, audio">
         <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>Annulla
       </button>
-      <button class="btn export" disabled title="Il render arriva in una fase successiva">
+      <button class="btn ghost" id="btn-redo-top" title="Ripeti (Ctrl+Y)">
+        <svg viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg>Ripeti
+      </button>
+      <button class="btn export" id="btn-export" title="Copertine Shorts e YouTube, poi esporta">
         <svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/></svg>Esporta
       </button>
     </div>
@@ -53,6 +56,7 @@
       <div class="stage" id="stage">
         <div class="frame" id="frame">
           <video id="video" preload="auto" playsinline></video>
+          <video id="vfx-video" class="vfx-video" muted playsinline preload="auto"></video>
           <div class="vignette" id="vignette"></div>
           <div class="trans-fx" id="trans-fx"></div>
           <div class="hook" id="hook"></div>
@@ -119,11 +123,11 @@
         <button class="icon-btn" id="tl-undo" title="Annulla (Ctrl+Z)">
           <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
         </button>
-        <button class="icon-btn" disabled title="Ripeti (in arrivo)">
+        <button class="icon-btn" id="tl-redo" title="Ripeti (Ctrl+Y)">
           <svg viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg>
         </button>
         <span class="tl-sep"></span>
-        <button class="icon-btn" disabled title="Dividi (in arrivo)">
+        <button class="icon-btn" id="tl-split" title="Dividi alla testina (Ctrl+B): poi clicca il pezzo e premi Togli">
           <svg viewBox="0 0 24 24"><path d="M12 3v18"/><path d="M5 8h4v8H5zM15 8h4v8h-4z"/></svg>
         </button>
         <button class="tool-btn" id="tl-toggle" disabled title="Togli o ripristina la parte selezionata (Canc)">
@@ -152,6 +156,12 @@
         <div class="head video-head" title="Camera (audio di riferimento)">
           <svg viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg>
         </div>
+        <div class="head audio-head" title="Effetti sonori: clicca un suono per regolarlo, trascinalo per spostarlo">
+          <svg viewBox="0 0 24 24"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
+        </div>
+        <div class="head vfx-head" title="Clip AI (Genera con Higgsfield): clicca per aprirle">
+          <svg viewBox="0 0 24 24"><path d="m12 3 1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/></svg>
+        </div>
       </div>
       <div class="tl-scroll" id="tl-scroll">
         <div class="tl-content" id="tl-content">
@@ -163,11 +173,16 @@
             <div class="ranges" id="ranges"></div>
             <div class="tl-trans" id="tl-trans"></div>
           </div>
+          <div class="track track-audio" id="track-audio"></div>
+          <div class="track track-vfx" id="track-vfx"></div>
           <div class="playhead" id="playhead"><div class="ph-knob"></div></div>
         </div>
       </div>
     </div>
   </section>
+
+  <!-- Finestra Esporta: anteprima delle copertine -->
+  <div class="export-modal" id="export-modal" hidden></div>
 
   <!-- Visualizzatore a schermo intero: il fotogramma #frame viene spostato qui dentro -->
   <div class="viewer" id="viewer" hidden>
@@ -192,6 +207,10 @@
         <svg viewBox="0 0 24 24"><path d="M15 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h7l8-8V6a3 3 0 0 0-3-3h-3z"/><path d="M13 21v-5a3 3 0 0 1 3-3h5"/></svg>Sticker</button>
       <button class="pill-btn tx-btn" id="v-images" title="Cerca foto sul web, scontornale e mettile nel video">
         <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg>Immagini</button>
+      <button class="pill-btn tx-btn vfx-btn" id="v-vfx" title="Genera con Higgsfield: effetti AI dentro la ripresa vera">
+        <svg viewBox="0 0 24 24"><path d="m12 3 1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>Genera AI</button>
+      <button class="pill-btn tx-btn" id="v-audio" title="Volume della voce e degli effetti sonori">
+        <svg viewBox="0 0 24 24"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>Audio</button>
       <button class="pill-btn tx-btn" id="v-effects" title="Animazioni di testo e sticker, transizioni tra clip">
         <svg viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg>Effetti</button>
       <button class="icon-btn" id="v-close" title="Esci (Esc)">
