@@ -196,6 +196,18 @@ reinventa da un fotogramma:
    sola fino a dove l'effetto finisce davvero (max 4 s), poi dissolvenza;
 5. Claude rivede il prima/dopo (ok / da correggere con prompt corretto / non va bene).
 
+**Automatica (predefinita): Claude fa da regista e smista.** Scrivi la richiesta come la diresti
+a voce; Claude la completa con le 5 domande del regista (camera, tono, chi/cosa/perché, luce,
+texture e interazione), se manca qualcosa di essenziale **ti fa 1-3 domande nella scheda prima di
+spendere** (*Rispondi e genera* oppure *Genera così*), poi sceglie la ricetta
+(`knowledge/higgsfield-router.md`):
+- **effetto** attorno a te (drago, fuoco, cielo): Seedance 2.0 720p + upscale, persona vera
+  rimessa sopra (~12 crediti);
+- **cambio vestiti / oggetto**: Genjutsu Lite 720p + foto del vestito (GPT Image) + upscale, solo
+  la **testa vera** rimessa sopra (volto da MediaPipe in locale + sagoma RVM) (~10,5 crediti);
+- **trasformazione** (alieno, robot): Genjutsu Lite, la persona è quella dell'AI (~10,5 crediti).
+Le qualità manuali restano in *Avanzate*.
+
 Con la qualità *Migliore sul piano Starter* la clip AI a 720p viene portata a 1080p con
 l'upscaler ByteDance di Higgsfield (preset `aigc`, ~1-2 crediti) prima del composito.
 *Elimina* sposta i file della clip nel cestino del progetto (`work/vfx/_cestino/`), non li

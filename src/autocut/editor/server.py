@@ -176,11 +176,15 @@ class VfxBody(BaseModel):
     dur_ms: int = Field(ge=500, le=3000)
     request: str = Field(min_length=1, max_length=1200)
     protect: bool = True
-    quality: str = "draft"
+    quality: str = "auto"  # automatica: Claude sceglie ricetta e modello
 
 
 class VfxRetryBody(BaseModel):
     use_fix: bool = True
+
+
+class VfxAnswerBody(BaseModel):
+    answers: list[str] = Field(default_factory=list, max_length=3)  # vuoto = «genera così»
 
 
 class VfxEnableBody(BaseModel):
@@ -610,6 +614,8 @@ def create_app(
                               "usd": vfxmod.api_usd(k, (1080, 1920), vfxmod.GEN_MS / 1000)
                               if q.get("api") else 0}
                           for k, q in vfxmod.QUALITIES.items()},
+            "recipes": {k: {"label": r["label"], "credits": r["credits"], "protect": r["protect"]}
+                        for k, r in vfxmod.RECIPES.items()},
             "ref_credits": 0.12,
         }  # fmt: skip
 
@@ -641,6 +647,17 @@ def create_app(
     def vfx_retry(shot_id: str, body: VfxRetryBody) -> JSONResponse:
         try:
             vfxmod.retry(project_dir, shot_id, body.use_fix)
+        except vfxmod.VfxError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        start_vfx(shot_id)
+        return JSONResponse(payload())
+
+    @app.post("/api/vfx/{shot_id}/answer")
+    def vfx_answer(shot_id: str, body: VfxAnswerBody) -> JSONResponse:
+        if any(s.status == "running" for s in vfxmod.load(project_dir).shots):
+            raise HTTPException(409, "c'è già una generazione in corso: aspetta che finisca")
+        try:
+            vfxmod.answer(project_dir, shot_id, [a[:300] for a in body.answers])
         except vfxmod.VfxError as exc:
             raise HTTPException(400, str(exc)) from exc
         start_vfx(shot_id)

@@ -2052,7 +2052,7 @@ function renderTextPanels() {
   for (const [box, tab] of boxes) {
     // non interrompere chi sta scrivendo o trascinando un cursore
     const active = document.activeElement;
-    if (box.contains(active) && ["tx-text", "st-custom", "img-q", "vfx-text"].includes(active.id)) continue;
+    if (box.contains(active) && (["tx-text", "st-custom", "img-q", "vfx-text"].includes(active.id) || active.dataset?.q !== undefined)) continue;
     if (S.txSliding && box.contains(S.txSliding)) continue;
     const top = box.scrollTop;
     if (tab === "transitions") S.fxTab = "trans"; // la scheda Transizioni = giunte del pannello Effetti
@@ -3226,9 +3226,22 @@ const VFX_SPARK = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" s
 const vfxSec = (ms) => `${(ms / 1000).toFixed(1).replace(".", ",")} s`;
 
 function vfxForm() {
-  S.vfx ??= { dur: 3000, protect: true, quality: "draft", text: "", at: null, sel: null };
+  S.vfx ??= { dur: 3000, protect: true, quality: "auto", text: "", at: null, sel: null, answers: {} };
   return S.vfx;
 }
+
+// costo indicativo di una clip: la ricetta scelta da Claude, oppure la qualità manuale
+function vfxCost(s) {
+  const v = vfxData();
+  if (s.quality === "auto" && s.recipe && v.recipes?.[s.recipe]) return v.recipes[s.recipe].credits;
+  return v.qualities[s.quality]?.credits ?? 12;
+}
+
+const VFX_PROTECT = {
+  person: "persona vera rimessa sopra",
+  head: "testa vera rimessa sopra",
+  none: "persona dell'AI",
+};
 
 function vfxCard(s) {
   const f = vfxForm();
@@ -3237,6 +3250,13 @@ function vfxCard(s) {
   let body = "";
   if (s.status === "running") {
     body = `<div class="vfx-run"><i></i><span><b>${esc(s.phase_label)}…</b></span></div>`;
+  } else if (s.status === "asking") {
+    const qs = s.plan?.questions ?? [];
+    const ans = f.answers[s.id] ?? [];
+    body = `<div class="vfx-ask"><div class="meta">Prima di spendere crediti Claude vuole sapere:</div>
+      ${qs.map((q, i) => `<label>${esc(q)}<input type="text" data-q="${i}" data-id="${esc(s.id)}" maxlength="300" value="${esc(ans[i] ?? "")}"></label>`).join("")}
+      <div class="acts"><button class="btn vfx-go" data-vfx="answer" data-id="${esc(s.id)}">${VFX_SPARK} Rispondi e genera</button>
+      <button class="btn" data-vfx="skip" data-id="${esc(s.id)}" title="Claude decide da solo quello che manca">Genera così</button></div></div>`;
   } else if (s.status === "error") {
     body = `<div><span class="vfx-badge error">Non riuscita</span></div><div class="tx-hint err">${esc(s.error)}</div>`;
   } else {
@@ -3248,11 +3268,12 @@ function vfxCard(s) {
       ${s.sheet_url ? `<details><summary class="meta">Prima / dopo</summary><a href="${esc(s.sheet_url)}" target="_blank"><img class="vfx-sheet" src="${esc(s.sheet_url)}" alt="prima e dopo"></a></details>` : ""}`;
   }
   const risk = s.plan?.risk ? `<div class="vfx-risk">⚠ ${esc(s.plan.risk)}</div>` : "";
-  const protect = s.plan && "protect_person" in s.plan ? s.plan.protect_person : s.protect;
   const fid = s.plan?.fidelity ? ` (fedeltà ${String(s.plan.fidelity.median).replace(".", ",")})` : "";
-  const mode = s.plan?.mode === "direct" ? ` · clip AI diretta${fid}` : s.plan?.mode === "protected" ? ` · persona vera rimessa sopra${fid}` : "";
-  const cost = vfxData().qualities[s.quality]?.credits ?? 4;
-  const acts = s.status === "running" ? "" : `<div class="acts">
+  const pm = s.plan?.protect_mode;
+  const mode = s.plan?.mode === "direct" && pm !== "none" ? ` · clip AI diretta${fid}` : pm ? ` · ${VFX_PROTECT[pm] ?? pm}${pm === "person" ? fid : ""}` : "";
+  const recipe = s.plan?.recipe_label ? `<div class="vfx-recipe">${VFX_SPARK} ${esc(s.plan.recipe_label)}</div>` : "";
+  const cost = vfxCost(s);
+  const acts = s.status === "running" || s.status === "asking" ? (s.status === "asking" ? `<div class="acts"><button class="btn" data-vfx="del" data-id="${esc(s.id)}">Elimina</button></div>` : "") : `<div class="acts">
       ${s.final_url ? `<button class="btn ${s.enabled ? "" : "vfx-go"}" data-vfx="${s.enabled ? "off" : "on"}" data-id="${esc(s.id)}">${s.enabled ? "Togli dalla timeline" : "⬇ Metti in timeline"}</button>` : ""}
       <button class="btn" data-vfx="seek" data-id="${esc(s.id)}">Vai al punto</button>
       ${s.review?.fix_prompt ? `<button class="btn" data-vfx="fix" data-id="${esc(s.id)}" title="Rigenera con il prompt corretto da Claude">Rigenera corretta · ${cost} cr.</button>` : ""}
@@ -3261,8 +3282,8 @@ function vfxCard(s) {
     </div>`;
   return `<div class="vfx-card${f.sel === s.id ? " sel" : ""}" data-card="${esc(s.id)}">
     <div class="top"><b>${esc(s.title || s.request.slice(0, 48))}</b><span class="meta">${span}</span></div>
-    <div class="meta">«${esc(s.request.slice(0, 160))}» · ${protect ? "persona protetta" : "persona NON protetta"}${mode}${credits}${s.attempt > 1 ? ` · tentativo ${s.attempt}` : ""}</div>
-    ${body}${risk}${acts}</div>`;
+    <div class="meta">«${esc(s.request.slice(0, 160))}»${mode}${credits}${s.attempt > 1 ? ` · tentativo ${s.attempt}` : ""}</div>
+    ${recipe}${body}${risk}${acts}</div>`;
 }
 
 function vfxPanelHTML() {
@@ -3270,21 +3291,28 @@ function vfxPanelHTML() {
   const f = vfxForm();
   const at = f.at ?? nowMs();
   const running = v.shots.some((s) => s.status === "running");
-  const q = v.qualities[f.quality] ?? { credits: 4 };
-  const opts = Object.entries(v.qualities).map(([k, x]) =>
-    `<option value="${k}"${k === f.quality ? " selected" : ""}>${esc(x.label)}${x.usd ? "" : ` · ${x.credits} crediti`}</option>`).join("");
+  const auto = f.quality === "auto";
+  const q = v.qualities[f.quality] ?? { credits: 12 };
+  const opts = Object.entries(v.qualities).sort(([a], [b]) => (a === "auto" ? -1 : b === "auto" ? 1 : 0)).map(([k, x]) =>
+    `<option value="${k}"${k === f.quality ? " selected" : ""}>${esc(x.label)}${x.usd || k === "auto" ? "" : ` · ${x.credits} crediti`}</option>`).join("");
+  const costs = Object.values(v.recipes ?? {}).map((r) => r.credits);
+  const range = costs.length ? `${String(Math.min(...costs)).replace(".", ",")}–${String(Math.max(...costs)).replace(".", ",")} crediti` : "circa 12 crediti";
+  const label = auto ? `Genera · ${range}` : `Genera · ${q.usd ? `circa ${String(q.usd).replace(".", ",")} $` : `circa ${q.credits} crediti`}`;
+  const recipes = Object.values(v.recipes ?? {}).map((r) => `<li>${esc(r.label)} · ~${String(r.credits).replace(".", ",")} cr.</li>`).join("");
   const list = v.shots.slice().reverse().map(vfxCard).join("");
   return `<div class="vfx-panel">
     <h4>${VFX_SPARK}<span>Genera con <b>Higgsfield</b></span></h4>
-    <p class="tx-hint">Scrivi cosa vuoi vedere in questo punto: l'AI lo aggiunge alla tua ripresa vera, poi la clip si allinea al fotogramma e prende i colori del video. Volto e voce restano i tuoi.</p>
+    <p class="tx-hint">Scrivi cosa vuoi in questo punto, come lo diresti a un regista. Claude completa la richiesta (camera, tono, azione, luce, texture), ti fa una domanda se manca qualcosa, sceglie il modello migliore ed economico, genera, porta la clip a 1080p e la rivede. La tua voce resta sempre quella vera.</p>
     <div class="vfx-at"><span>Parte da <b>${clock(at)}</b>${f.at === null ? " (testina)" : ""}</span>
       <button class="btn" data-vfx="here">Usa la testina</button></div>
     <label class="vfx-row">Durata <input type="range" id="vfx-dur" min="500" max="${v.max_ms}" step="100" value="${f.dur}"><b>${vfxSec(f.dur)}</b></label>
-    <textarea id="vfx-text" maxlength="1200" placeholder="es. dietro di me compare un dragone cinese realistico che sputa fuoco verso l'alto e poi scompare">${esc(f.text)}</textarea>
-    <label class="vfx-chk"><input type="checkbox" id="vfx-protect"${f.protect ? " checked" : ""}><span><b>Proteggi la persona</b><br><span class="tx-hint">Il tuo corpo vero viene rimesso sopra la clip AI: volto e bocca restano al 100% tuoi. Spegnila solo se l'effetto deve toccarti (fuoco in testa, cambio vestiti).</span></span></label>
-    <label class="vfx-row">Qualità <select id="vfx-quality">${opts}</select><span></span></label>
-    <button class="btn vfx-go" data-vfx="go"${running ? " disabled" : ""}>${VFX_SPARK} ${running ? "Sto generando…" : `Genera · ${q.usd ? `circa ${String(q.usd).replace(".", ",")} $` : `circa ${q.credits} crediti`}`}</button>
-    <p class="tx-hint">Claude scrive il prompt con la skill higgsfield-vfx, controlla il costo prima di spendere e rivede il risultato. In 1080p/4K la persona di Seedance resta fedele e la clip si usa così com'è; se ti ha cambiato, rimette te. Poi decidi tu se metterlo in timeline.</p>
+    <textarea id="vfx-text" maxlength="1200" placeholder="es. dietro di me compare un dragone cinese che sputa fuoco · mettimi una giacca di pelle nera · trasformami in un alieno">${esc(f.text)}</textarea>
+    <button class="btn vfx-go" data-vfx="go"${running ? " disabled" : ""}>${VFX_SPARK} ${running ? "Sto generando…" : label}</button>
+    ${auto && recipes ? `<details class="vfx-adv"><summary class="meta">Cosa sa fare</summary><ul class="vfx-recipes">${recipes}</ul></details>` : ""}
+    <details class="vfx-adv"${auto ? "" : " open"}><summary class="meta">Avanzate</summary>
+      <label class="vfx-row">Qualità <select id="vfx-quality">${opts}</select><span></span></label>
+      <label class="vfx-chk"><input type="checkbox" id="vfx-protect"${f.protect ? " checked" : ""}><span><b>Proteggi la persona</b><br><span class="tx-hint">Lascia acceso: Claude rimette sopra la tua persona vera (o solo la testa quando cambia i vestiti). Spegnilo solo se vuoi che l'AI ridisegni anche te.</span></span></label>
+    </details>
     <div class="vfx-list">${list || `<div class="tx-hint">Nessuna clip AI ancora.</div>`}</div>
   </div>`;
 }
@@ -3303,7 +3331,10 @@ function wireVfxPanel(box) {
   box.addEventListener("input", (e) => {
     const f = vfxForm();
     if (e.target.id === "vfx-text") f.text = e.target.value;
-    else if (e.target.id === "vfx-dur") {
+    else if (e.target.dataset.q !== undefined) {
+      const a = (f.answers[e.target.dataset.id] ??= []);
+      a[Number(e.target.dataset.q)] = e.target.value;
+    } else if (e.target.id === "vfx-dur") {
       f.dur = Number(e.target.value);
       const b = e.target.parentElement.querySelector("b");
       if (b) b.textContent = vfxSec(f.dur);
@@ -3333,6 +3364,13 @@ function wireVfxPanel(box) {
         if (ok) { f.text = ""; f.at = null; renderTextPanels(); }
         break;
       }
+      case "answer": case "skip": {
+        const n = shot?.plan?.questions?.length ?? 0;
+        const given = b.dataset.vfx === "skip" ? [] : Array.from({ length: n }, (_, i) => (f.answers[id]?.[i] ?? "").trim());
+        if (b.dataset.vfx === "answer" && !given.some(Boolean)) { toast("Scrivi almeno una risposta, oppure premi «Genera così»", true); return; }
+        if (await mutate(`/api/vfx/${id}/answer`, { answers: given }, "Claude completa il piano e genera")) delete f.answers[id];
+        break;
+      }
       case "on": await mutate(`/api/vfx/${id}/enable`, { enabled: true }, "Clip AI nella timeline"); break;
       case "off": await mutate(`/api/vfx/${id}/enable`, { enabled: false }, "Clip AI tolta dalla timeline"); break;
       case "seek": if (shot) { seekMs(shot.start_ms); f.sel = id; renderVfxTrack(); renderTextPanels(); } break;
@@ -3350,7 +3388,7 @@ function renderVfxTrack() {
   if (!el) return;
   const f = vfxForm();
   el.innerHTML = vfxData().shots.map((s) => {
-    const cls = ["vfx-blk", s.status === "running" ? "running" : s.status === "error" ? "error" : s.enabled ? "" : "off", f.sel === s.id ? "sel" : ""].join(" ");
+    const cls = ["vfx-blk", s.status === "running" ? "running" : s.status === "asking" ? "asking" : s.status === "error" ? "error" : s.enabled ? "" : "off", f.sel === s.id ? "sel" : ""].join(" ");
     const w = Math.max(14, (s.dur_ms / 1000) * S.pps);
     const state = s.status === "running" ? s.phase_label : s.status === "error" ? "non riuscita" : s.enabled ? "nella timeline" : "pronta, non in timeline";
     return `<div class="${cls}" data-vfxblk="${esc(s.id)}" style="left:${xOf(s.start_ms)}px;width:${w}px" title="${esc(`${s.title || s.request} · ${state}`)}">✦<span>${w > 50 ? esc(s.title || "AI") : ""}</span></div>`;

@@ -7,6 +7,41 @@ Sources, in order of authority:
 - community skill OSideMedia/higgsfield-seedance-vfx (MIT);
 - our own tests on the creator's footage (2026-11-09).
 
+## Think like the director first (the creator's rule for every image and video)
+
+Before writing a single line, answer these five questions. Every answer must end up in the prompt
+as concrete words, not as a mood. A prompt that skips one of them is how slop starts.
+
+1. **Camera** - what shot this, and how: iPhone handheld vertical, locked tripod, cinema camera
+   with a 35 mm lens, drone, GoPro; framing (close-up, medium, wide), angle (eye level, low,
+   high), movement (static, slow push-in, orbit, handheld sway), depth of field. In a video edit
+   the camera is ALWAYS the one of Video 1: describe it so the model copies it ("vertical iPhone
+   footage, locked-off, medium close-up at eye level, shallow depth of field").
+2. **Tone** - the single emotion the shot must give: awe, threat, joy, irony, tension, wonder.
+   It decides pace and energy of the new element ("slow, majestic, menacing" vs "playful, quick").
+3. **Who, what, why** - who is in the frame, what happens, in what order, and why it happens
+   (the motivation makes the motion believable: the dragon rises *because* he names it; it
+   looks at him *because* he is speaking). Use the creator's own words as anchors.
+4. **Light** - the kind and its source: natural window light, warm practical lamp, cinematic
+   low-key, golden hour, neon cyberpunk, overcast. Say direction, warmth and contrast. In an
+   edit, the light is the room's: name it, then say how the new element is lit by it and what
+   light the element itself adds (fire = warm flicker on wall, ceiling, skin).
+5. **Texture and interaction** - materials described exactly (matte scales, wet stone, worn
+   leather, film grain, lens softness) and how every element touches the scene: contact
+   shadows, occlusion behind the head, reflections, dust, air displacement, hair moved by wind.
+   Interaction with the context is what makes it credible.
+
+Keywords that work (use the real terms): shot types ("medium close-up", "over-the-shoulder"),
+lens ("35mm", "85mm", "anamorphic"), movement ("dolly-in", "orbit", "handheld"), light
+("Rembrandt lighting", "rim light", "practical light", "volumetric haze", "golden hour"),
+texture ("film grain", "subsurface scattering", "matte", "weathered"), realism ("photoreal",
+"shot on iPhone", "documentary footage"). Avoid empty hype words ("epic", "ultra 8K
+masterpiece") - they add nothing.
+
+For a video edit the five answers go inside the template below (camera and light in the first
+line and the preserve list, tone and who/what/why in the change and the beats, texture and
+interaction in the physics line). For a reference image they go in the image prompt.
+
 ## The two rules that matter most
 
 1. **Edit, don't reference.** Call the real clip **Video 1** and the reference image **Image 1**.
@@ -79,6 +114,53 @@ dragon on screen at frame 0 and its tail at the last frame, whatever the beats s
   Seedance redraws the person. The editor measures how faithful the AI person is: if faithful it
   uses the AI clip as is (no cut-out, no edges, like everyone else does); otherwise it puts the
   real person back on top. Write the prompt so the person never needs replacing.
+
+## Genjutsu format (recipes outfit and transform)
+
+Higgsfield rewrites every Genjutsu prompt into these sections (seen in `enhanced_prompt` of
+our 2026-11-10 jacket test); write it in this shape so our direction reaches the model intact.
+Plain text, section names in capitals:
+
+```
+TASK
+Edit Video 1. Replace <what he wears/holds now, as seen in the frame> with <the thing> from
+Image 1. He stays himself: same face, glasses, beard, hair, skin, build, expression, hands and
+fingers as in Video 1. <fit: how it sits on his shoulders/arms, where sleeves end, what stays
+visible (bracelet, t-shirt)>. Video 1 controls the performance, blocking, camera, framing and
+timing; everything outside the replacement keeps its look from Video 1.
+REFERENCES
+Image 1: <material, colour, details>; use <the garment/object/character> only.
+SOURCE VIDEO
+<one line: who, framing, what he does, one continuous shot>.
+SHOTS
+Shot 1 (0.0-4.0s, continuous): <camera: iPhone front camera, locked-off, angle, framing>.
+<how the new thing moves with his gestures: folds at the elbows, light on zips>.
+PROPS
+<the new thing as one physical object: material, texture, how light hits it>.
+SETTING
+Keep the original location from Video 1: <room, window light direction and temperature,
+exposure, lens softness, grain> unchanged.
+NEGATIVE
+no identity or face change, no altered lips or lip-sync, no altered hands or fingers, no
+leftover of the old garment, no warped details, no extra people, no text, no logos, no
+watermark, no cuts, no reframing, no new camera moves, no slow motion.
+```
+
+The reference image is a product-style photo of the garment or object alone: three-quarter
+view, neutral light-grey seamless background, soft light from the same side as the room's
+window, photoreal, no person.
+
+## Transform format (recipe transform: Seedance, he changes and comes back)
+
+Use the Seedance template above, with the change being HIM: "Strictly edit Video 1 ... Change
+only one thing: on the words '<x>', at about T1 seconds, his face and head turn into the
+creature of Image 1, keeping his exact head motion, mouth movements and lip-sync, glasses,
+gestures and timing; on the words '<y>', at about T2 seconds, it turns back into his own real
+face, fully himself by T3." Then: "The clip begins exactly on the start frame and ends exactly
+on the end frame, his real face." Describe the transition physically (skin colour spreading
+from the neck, veins rising, then draining) - never a fade or dissolve. The reference image is
+a head-and-shoulders portrait of the character alone (three-quarter view, neutral grey, room's
+light direction). Never the protected name: describe an original design with the same traits.
 
 ## Repairing a take
 

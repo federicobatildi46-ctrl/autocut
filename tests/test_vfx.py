@@ -102,7 +102,10 @@ def test_run_shot_end_to_end_with_fakes(tmp_path):
     def fetch(url, dest):
         shutil.copy(gen_src if url.endswith(".mp4") else _png(tmp_path / "r.png"), dest)
 
-    s = vfx.add(tmp_path, start_ms=100, dur_ms=1000, request="drago dietro di me", camera_ms=10000)
+    s = vfx.add(
+        tmp_path, start_ms=100, dur_ms=1000, request="drago dietro di me", quality="draft",
+        camera_ms=10000,
+    )  # fmt: skip
     agent = FakeAgent()
     out = vfx.run_shot(
         tmp_path, s.id, tl=_tl(raw), agent=agent, hf=hf, fetch=fetch,
@@ -234,3 +237,121 @@ def test_starter_quality_upscales_the_ai_clip_before_compositing(tmp_path):
     assert up[up.index("--preset") + 1] == "aigc" and up[up.index("--resolution") + 1] == "1080p"
     assert out.plan["upscaled"] is True and out.credits == pytest.approx(12)
     assert (vfx.shot_dir(tmp_path, s.id) / "gen-1-1080.mp4").is_file()
+
+
+def _faces(n=200):
+    return [[0.35, 0.2, 0.3, 0.15]] * n  # volto al centro, in alto (frazioni dell'immagine)
+
+
+@needs_ffmpeg
+def test_auto_routes_an_outfit_change_to_genjutsu_with_the_real_head(tmp_path):
+    raw = _clip(tmp_path / "raw.mp4")
+    source = _clip(tmp_path / "source.mp4")
+    gen_src = _clip(tmp_path / "gen.mp4", size="720x1280", color="smptebars")
+    calls = []
+
+    def hf(args):
+        calls.append(args)
+        if args[:2] == ["generate", "cost"]:
+            return {"credits": 2 if vfx.UPSCALE_JOB in args else 8}
+        if "gpt_image_2_6" in args:
+            return {"result_url": "https://cdn/jacket.png"}
+        return {"result_url": "https://cdn/out.mp4"}
+
+    def fetch(url, dest):
+        shutil.copy(gen_src if url.endswith(".mp4") else _png(tmp_path / "j.png"), dest)
+
+    plan = {
+        **FakeAgent().plan,
+        "recipe": "outfit",
+        "prompt": "TASK\nEdit Video 1. Replace the grey fleece with the leather jacket in Image 1.",
+        "reference_image": {"prompt": "black leather biker jacket, ghost mannequin", "why": "x"},
+    }
+    agent = FakeAgent(plan=plan)
+    s = vfx.add(tmp_path, start_ms=0, dur_ms=2000, request="giacca di pelle", camera_ms=10000)
+    out = vfx.run_shot(
+        tmp_path, s.id, tl=_tl(raw), agent=agent, hf=hf, fetch=fetch,
+        masks_fn=lambda src: _masks(tmp_path / f"m-{src.stem}", 130),
+        source_fn=lambda *a, **k: source, faces_fn=lambda src: _faces(),
+    )  # fmt: skip
+    assert out.status == "done", out.error
+    assert out.recipe == "outfit" and out.plan["protect_mode"] == "head"
+    create = next(a for a in calls if a[:2] == ["generate", "create"] and vfx.GENJUTSU_JOB in a)
+    assert create[create.index("--image-references") + 1].endswith("ref.png")
+    assert "--generate_audio" not in create and "--start-image" not in create
+    assert any(vfx.UPSCALE_JOB in a for a in calls if a[:2] == ["generate", "create"])
+    assert out.credits == pytest.approx(10.5)  # 8 Genjutsu + 2 upscale + 0.5 foto della giacca
+    assert out.dur_ms == 2000  # il cambio vestiti non si allunga come un effetto
+    assert "AUTOMATICA" in agent.calls[0] and "outfit" in agent.calls[0]
+
+
+@needs_ffmpeg
+def test_claude_asks_before_spending_then_uses_the_answers(tmp_path):
+    raw = _clip(tmp_path / "raw.mp4")
+    created = []
+
+    def hf(args):
+        if args[:2] == ["generate", "create"]:
+            created.append(args)
+        return {"credits": 4}
+
+    agent = FakeAgent(plan={**FakeAgent().plan, "questions": ["Che giacca: colore e materiale?"]})
+    s = vfx.add(tmp_path, start_ms=0, dur_ms=1000, request="cambiami la giacca", camera_ms=10000)
+    out = vfx.run_shot(tmp_path, s.id, tl=_tl(raw), agent=agent, hf=hf,
+                       source_fn=lambda *a, **k: raw)  # fmt: skip
+    assert out.status == "asking" and out.plan["questions"] == ["Che giacca: colore e materiale?"]
+    assert not created  # nessun credito speso prima delle risposte
+    again = vfx.answer(tmp_path, s.id, ["pelle nera da motociclista"])
+    assert again.status == "running" and again.asked
+    assert again.answers == ["Che giacca: colore e materiale? -> pelle nera da motociclista"]
+    vfx.run_shot(tmp_path, s.id, tl=_tl(raw), agent=agent, hf=hf, source_fn=lambda *a, **k: raw)
+    assert "pelle nera da motociclista" in agent.calls[-1]
+    assert "NON fare altre domande" in agent.calls[-1]
+    assert vfx.get(tmp_path, s.id).status != "asking"  # le domande non si ripetono
+
+
+def test_head_alpha_keeps_the_head_and_not_the_shoulders():
+    import numpy as np
+
+    person = np.ones((320, 180, 1), np.float32)
+    a = vfx.head_alpha([0.35, 0.2, 0.3, 0.15], person, 180, 320)
+    assert a[int(0.27 * 320), 90, 0] > 0.9  # centro del volto
+    assert a[int(0.6 * 320), 90, 0] < 0.05  # petto: lì c'è il vestito nuovo
+    assert a[int(0.27 * 320), 5, 0] < 0.05  # lato dell'inquadratura
+
+
+def test_api_answer_restarts_the_shot(tmp_path):
+    ran = []
+    c, pdir = make_client(tmp_path, vfx_runner=lambda p, sid: ran.append(sid))
+    sid = c.post("/api/vfx", json={"start_ms": 0, "dur_ms": 2000, "request": "giacca"}).json()[
+        "vfx"
+    ]["shots"][0]["id"]
+    vfx.edit(pdir, sid, status="done")  # il runner finto non lo fa
+    assert c.post(f"/api/vfx/{sid}/answer", json={"answers": []}).status_code == 400  # non chiede
+    vfx.edit(pdir, sid, status="asking", plan={"questions": ["Che colore?"]})
+    p = c.post(f"/api/vfx/{sid}/answer", json={"answers": ["nera"]}).json()
+    shot = p["vfx"]["shots"][0]
+    assert shot["status"] == "running" and shot["asked"] and ran == [sid, sid]
+    assert set(p["vfx"]["recipes"]) == {"effect", "outfit", "transform"}
+
+
+@needs_ffmpeg
+def test_a_job_blocked_by_the_filter_is_rewritten_once_without_protected_names(tmp_path):
+    raw = _clip(tmp_path / "raw.mp4")
+    created = []
+
+    def hf(args):
+        if args[:2] == ["generate", "cost"]:
+            return {"credits": 4}
+        created.append(args)
+        raise vfx.VfxError(f"Generazione {vfx.BLOCKED}: nome protetto. Credito restituito.")
+
+    plan = {**FakeAgent().plan, "recipe": "transform", "prompt": "Strictly edit Video 1: " * 4}
+    agent = FakeAgent(plan=plan)
+    s = vfx.add(tmp_path, start_ms=0, dur_ms=3000, request="faccia di Hulk", camera_ms=10000)
+    out = vfx.run_shot(tmp_path, s.id, tl=_tl(raw), agent=agent, hf=hf,
+                       source_fn=lambda *a, **k: raw)  # fmt: skip
+    assert out.status == "error" and vfx.BLOCKED in (out.error or "")
+    assert len(agent.calls) == 2 and "BLOCCATO" in agent.calls[1]  # riscritto una volta sola
+    assert len(created) == 4  # per giro: Seedream bloccato + ripiego Soul; due giri, poi stop
+    assert "AUTOMATICA" in agent.calls[0] and "MAI nomi" in agent.calls[0]

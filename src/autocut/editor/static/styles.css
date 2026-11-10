@@ -924,4 +924,13 @@ img.emo { width: 1em; height: 1em; display: inline-block; vertical-align: -0.12e
 .vfx-badge.q { background: rgba(255,255,255,.1); color: var(--muted); }
 .vfx-issues { margin: 0; padding-left: 16px; font-size: 11.5px; color: var(--muted); }
 .vfx-risk { font-size: 11.5px; color: #ffcb4d; }
+.vfx-recipe { display: flex; gap: 6px; align-items: center; font-size: 11.5px; font-weight: 600; color: #d6b8ff; }
+.vfx-ask { display: grid; gap: 8px; padding: 8px; border-radius: 8px; background: rgba(177,77,255,.08); border: 1px solid rgba(177,77,255,.35); }
+.vfx-ask label { display: grid; gap: 4px; font-size: 12px; font-weight: 600; }
+.vfx-ask input { background: rgba(255,255,255,.06); color: inherit; border: 1px solid rgba(255,255,255,.16); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; font-weight: 400; }
+.vfx-adv { display: grid; gap: 8px; }
+.vfx-adv[open] { gap: 8px; }
+.vfx-adv > summary { cursor: pointer; }
+.vfx-recipes { margin: 4px 0 0; padding-left: 16px; font-size: 11.5px; color: var(--muted); display: grid; gap: 2px; }
+.vfx-blk.asking { background: rgba(177,77,255,.35); outline: 1px dashed #d6b8ff; }
 .vfx-sheet { width: 100%; border-radius: 6px; cursor: zoom-in; }

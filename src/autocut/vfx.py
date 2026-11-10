@@ -56,13 +56,49 @@ QUALITIES: dict[str, dict[str, Any]] = {
     "uhd": {"label": "Finale 4K (piano Pro/Ultimate, consigliata)", "job": "seedance_2_0", "credits": 88,
             "args": ["--mode", "std", "--resolution", "4k"]},
 }  # fmt: skip
+QUALITIES["auto"] = {"label": "Automatica: Claude sceglie modello e ricetta (consigliata)",
+                     "job": "", "credits": 12, "args": []}  # fmt: skip
+AUTO_EFFECT_QUALITY = "hd720"  # la ricetta "effect" in automatico: la migliore sullo Starter
+
+# Ricette fra cui Claude smista la richiesta (knowledge/higgsfield-router.md, provate sul piano
+# Starter il 2026-11-10). protect = cosa della ripresa vera torna sopra la clip AI:
+# person = tutta la persona (l'effetto è attorno a te), head = solo la testa (cambia il corpo:
+# vestiti, oggetto in mano), none = niente (cambi tu: alieno, personaggio).
+GENJUTSU_JOB = "hf_mult_replace_object_flash"  # Genjutsu Lite: 8 crediti per 4 s a 720p
+RECIPES: dict[str, dict[str, Any]] = {
+    "effect": {"label": "Effetto nella scena · Seedance 2.0 720p + upscale 1080p", "credits": 12,
+               "protect": "person", "ref_job": "text2image_soul_v2", "ref_cost": 0.12,
+               "ref_args": ["--aspect_ratio", "1:1"]},
+    "outfit": {"label": "Cambio vestiti / oggetto · Genjutsu Lite 720p + upscale 1080p",
+               "credits": 10.5, "job": GENJUTSU_JOB, "protect": "head",
+               "ref_job": "gpt_image_2_6", "ref_cost": 0.5, "ref_args": ["--quality", "medium",
+               "--aspect_ratio", "3:4"]},
+    # la trasformazione va e torna (diventi Hulk 3 s e poi torni tu): Seedance con il primo e
+    # l'ultimo fotogramma VERI vincolati garantisce partenza e ritorno; Genjutsu non li ha
+    "transform": {"label": "Trasformazione della persona · Seedance 2.0 720p con inizio e fine veri + upscale 1080p",
+                  "credits": 13.25, "protect": "none",
+                  # il riferimento è il TUO fotogramma vero modificato (Seedream: mantiene texture,
+                  # occhiali, luce): provato il 2026-11-10, GPT Image bloccava il "gigante verde"
+                  "ref_job": "seedream_v5_pro", "ref_cost": 1.25, "ref_from_frame": True,
+                  "ref_args": ["--resolution", "1k"]},
+}  # fmt: skip
+# il filtro contenuti di Higgsfield chiude il job con stato "nsfw" anche per i personaggi protetti
+# (Hulk, Spider-Man...), i marchi e i volti famosi; il credito viene restituito
+BLOCKED = "bloccata dal filtro contenuti di Higgsfield"
+BLOCK_NOTE = (
+    "Il tentativo precedente è stato BLOCCATO dal filtro contenuti di Higgsfield (credito "
+    "restituito). Quasi sempre è un nome protetto: riscrivi TUTTO (prompt video e riferimento) "
+    "senza nomi di personaggi, film, marchi o persone famose, descrivendo un design originale "
+    "con le stesse caratteristiche visive (es. Hulk -> gigante dalla pelle verde, design originale)."
+)
 # fedeltà della persona AI rispetto alla vera (differenza media sulla persona, 0-255):
 # ~4 = identica, 6.9 = bozza 480p accettabile, 11 = ridisegnata (primo test del drago)
 FIDELITY_OK = 6.0
 FIDELITY_OK_P90 = 9.0
 PHASES = {
     "clip": "preparo la clip vera",
-    "plan": "Claude scrive il prompt (skill higgsfield-vfx)",
+    "plan": "Claude sceglie la ricetta e scrive il prompt (skill higgsfield-vfx)",
+    "questions": "Claude ti fa qualche domanda prima di spendere",
     "reference": "genero l'immagine di riferimento",
     "cost": "controllo i crediti",
     "generate": "Seedance genera la clip (qualche minuto)",
@@ -88,8 +124,12 @@ class Shot(BaseModel):
     request: str
     asked_ms: int = 0  # durata chiesta dal creator (dur_ms può allungarsi fino a 4 s)
     protect: bool = True
-    quality: Literal["draft", "cheap", "hd720", "hd", "uhd", "api720", "api1080"] = "draft"
-    status: Literal["running", "done", "error"] = "running"
+    quality: Literal["auto", "draft", "cheap", "hd720", "hd", "uhd", "api720", "api1080"] = "auto"
+    recipe: str = ""  # effect | outfit | transform (scelta da Claude in automatico)
+    answers: list[str] = Field(default_factory=list)  # risposte del creator alle domande
+    asked: bool = False  # le domande sono già state fatte: non se ne fanno altre
+    note: str = ""  # avviso per il prossimo piano (es. bloccato dal filtro: niente nomi protetti)
+    status: Literal["running", "asking", "done", "error"] = "running"
     phase: str = "clip"
     log: str = ""
     error: str | None = None
@@ -148,7 +188,7 @@ def get(project_dir: Path, shot_id: str) -> Shot:
 
 def add(
     project_dir: Path, *, start_ms: int, dur_ms: int, request: str, protect: bool = True,
-    quality: str = "draft", camera_ms: int,
+    quality: str = "auto", camera_ms: int,
 ) -> Shot:  # fmt: skip
     request = request.strip()
     if not request:
@@ -223,6 +263,11 @@ def hf_cli(args: list[str], timeout: int = 1800) -> Any:
         low = msg.lower()
         if "expired" in low or "not authenticated" in low or "login" in low:
             raise VfxError("Higgsfield: sessione scaduta. Premi «Ricollega Higgsfield»")
+        if "nsfw" in low or "moderation" in low or "content policy" in low:
+            raise VfxError(
+                f"Generazione {BLOCKED}: di solito per il nome di un personaggio protetto, un "
+                "marchio o un volto famoso. Credito restituito."
+            )
         if "plan required" in low:
             plans = re.findall(r'"([A-Za-z]+)"', msg)
             raise VfxError(
@@ -362,6 +407,21 @@ def video_args(
     return args
 
 
+def genjutsu_args(prompt: str, clip: Path, ref: Path) -> list[str]:
+    """Genjutsu Lite "replace object": esattamente 1 video + almeno 1 immagine (il vestito,
+    l'oggetto o il personaggio). Durata = quella della clip; nessun audio generato."""
+    return [GENJUTSU_JOB, "--resolution", "720p", "--prompt", prompt,
+            "--video-references", str(clip), "--image-references", str(ref)]  # fmt: skip
+
+
+def recipe_of(shot: Shot, plan: dict[str, Any] | None = None) -> str:
+    """La ricetta del colpo: in automatico quella scelta da Claude, altrimenti l'effetto."""
+    if shot.quality != "auto":
+        return "effect"
+    r = (plan or {}).get("recipe") or shot.recipe or "effect"
+    return r if r in RECIPES else "effect"
+
+
 # --- richieste alla skill ---------------------------------------------------------------
 
 
@@ -378,8 +438,40 @@ def plan_request(
                 "come start frame ed end frame vincolati: scrivi che la clip inizia e finisce "
                 "esattamente come quei fotogrammi.")  # fmt: skip
     prot = "sì (default)" if shot.protect else "no: il creator l'ha spenta"
+    if shot.quality == "auto":
+        menu = "\n".join(
+            f"- {k}: {r['label']} (~{r['credits']:g} crediti)" for k, r in RECIPES.items()
+        )
+        route = f"""Modalità AUTOMATICA: scegli tu la ricetta migliore per questa richiesta (references/router.md)
+e mettila in "recipe":
+{menu}
+Con outfit il riferimento (Image 1: il vestito o l'oggetto) è OBBLIGATORIO e il prompt segue il
+formato Genjutsu di references/prompting.md. Con transform (diventi qualcos'altro e poi torni te
+stesso) il riferimento è OBBLIGATORIO ed è il TUO fotogramma vero modificato: il suo "prompt" è
+un'istruzione di modifica della foto ("Edit this photo: turn the man's face and neck into ...
+Keep exactly the same pose, framing, glasses, hair, clothes, room and light"); il prompt video
+segue il formato Seedance qui sotto (inizio e fine sono i tuoi fotogrammi veri). Con effect vale il formato Seedance.
+MAI nomi di personaggi protetti, film, marchi o persone famose in nessun prompt (video o
+riferimento): il filtro di Higgsfield blocca il job. Descrivi un design originale con le stesse
+caratteristiche visive (es. "Hulk" -> "a towering green-skinned rage giant of original design")."""
+        if shot.asked:
+            qa = "\n".join(f"- {a}" for a in shot.answers) or "- (il creator ha detto: genera così)"
+            route += f'\nHai già fatto le domande. Risposte del creator:\n{qa}\nNON fare altre domande: "questions": [].'
+        else:
+            route += """
+Se manca un'informazione ESSENZIALE per un risultato ottimo (secondo le 5 domande del regista:
+camera, tono, chi/cosa/perché, luce, texture e interazione) e non la puoi dedurre dal fotogramma o
+dal parlato, metti in "questions" da 1 a 3 domande brevi in italiano (es. che giacca: colore,
+materiale, stile?). Se puoi decidere tu bene, "questions": [] e scrivi il piano completo."""
+    else:
+        route = (
+            'Ricetta fissa: effect (il creator ha scelto la qualità a mano). "recipe": "effect".'
+        )
+    if shot.note:
+        route += f"\nATTENZIONE: {shot.note}"
     return f"""Usa la skill higgsfield-vfx. Job: plan.
 Richiesta del creator: «{shot.request}»
+{route}
 Frame iniziale della clip (guardalo con Read): {frame}
 Formato: {fmt}, {size[0]}x{size[1]}, ripresa vera del creator.
 Durata dell'effetto: {shot.dur_ms / 1000:.1f} s. La clip inviata a Seedance dura {GEN_MS // 1000} s ma ne usiamo
@@ -389,16 +481,25 @@ e dì esplicitamente che dopo quel secondo la stanza resta com'era fino alla fin
 Parlato in questi secondi: «{transcript or "(silenzio)"}»
 Protezione persona richiesta dal creator: {prot}. Se è "no", rispettala: protect_person=false.
 Qualità: {QUALITIES[shot.quality]["label"]}. La clip vera è "Video 1"; l'eventuale immagine di
-riferimento sarà "Image 1". {ends} Scrivi il prompt nel formato ufficiale di references/prompting.md.
+riferimento sarà "Image 1". Per la ricetta effect: {ends} Scrivi il prompt nel formato ufficiale di
+references/prompting.md, rispondendo prima alle 5 domande del regista.
 Rispondi solo con il JSON del job plan."""
 
 
-def review_request(shot: Shot, sheet: Path, prompt: str, protect: bool) -> str:
+PROTECT_LABEL = {
+    "person": "tutta la persona vera è rimessa sopra la clip AI",
+    "head": "solo la TESTA vera è rimessa sopra: corpo e vestiti sono dell'AI (devono essere cambiati)",
+    "none": "nessuna: la persona è quella dell'AI (trasformazione voluta), il labiale lo tiene il modello",
+}
+
+
+def review_request(shot: Shot, sheet: Path, prompt: str, protect: bool | str) -> str:
+    mode = protect if isinstance(protect, str) else ("person" if protect else "none")
     return f"""Usa la skill higgsfield-vfx. Job: review.
 Richiesta del creator: «{shot.request}»
 Foglio prima/dopo (guardalo con Read): {sheet}
 Riga in alto = ripresa originale, riga in basso = take AI già composta, stessi istanti.
-Protezione persona: {"attiva (la persona in basso è quella vera rimessa sopra)" if protect else "spenta"}.
+Protezione: {PROTECT_LABEL.get(mode, mode)}.
 Prompt usato: {prompt}
 Rispondi solo con il JSON del job review."""
 
@@ -558,6 +659,57 @@ def rvm_matte(video: Path, n: int | None = None) -> tuple[Path, int]:
         )
     done.write_text(str(count))
     return dest, count
+
+
+def face_boxes(video: Path) -> list[list[float] | None]:
+    """Riquadro del volto per ogni fotogramma (MediaPipe in locale, ambiente separato).
+    Cache <video>-faces.json accanto al video."""
+    from .render.preview import MATTE_ENV
+
+    dest = video.with_name(video.stem + "-faces.json")
+    if not dest.exists():
+        uv = shutil.which("uv")
+        if uv is None:
+            raise VfxError("per proteggere la testa serve uv nel PATH")
+        worker = Path(__file__).parent / "render" / "face_worker.py"
+        proc = subprocess.run(
+            [uv, "run", "--system-certs", *MATTE_ENV, "python", str(worker), str(video), str(dest)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )  # fmt: skip
+        if proc.returncode != 0 or not dest.exists():
+            raise VfxError(f"rilevamento del volto: {(proc.stderr or proc.stdout).strip()[-300:]}")
+    raw = json.loads(dest.read_text(encoding="utf-8"))
+    return [b if isinstance(b, list) and len(b) == 4 else None for b in raw]
+
+
+def smooth_boxes(boxes: list[list[float] | None]) -> list[list[float]] | None:
+    """Riempie i fotogrammi senza volto col più vicino e fa la media su 5 (niente tremolio)."""
+    import numpy as np
+
+    have = [i for i, b in enumerate(boxes) if b is not None]
+    if not have:
+        return None
+    filled = [boxes[min(have, key=lambda j: abs(j - i))] for i in range(len(boxes))]
+    arr = np.array(filled, np.float32)
+    return [arr[max(0, i - 2) : i + 3].mean(0).tolist() for i in range(len(arr))]
+
+
+def head_alpha(box: list[float], person: Any, w: int, h: int) -> Any:
+    """Testa vera da rimettere sopra (1 = ripresa vera): ellisse dalla cima dei capelli a mento e
+    barba, moltiplicata per la sagoma vera (senza, ai lati della mascella spuntava il muro vero
+    sopra la spalla del vestito nuovo). Provata sul cambio giacca del 2026-11-10."""
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    x, y, bw, bh = box[0] * w, box[1] * h, box[2] * w, box[3] * h
+    top, bot = y - 0.55 * bh, y + 1.10 * bh
+    cx, cy, rx, ry = x + bw / 2, (top + bot) / 2, max(bw * 0.70, 1.0), max((bot - top) / 2, 1.0)
+    yy, xx = np.mgrid[0:h, 0:w]
+    m = (((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2) <= 1.0
+    blur = max(2, round(10 * w / 720))
+    img = Image.fromarray((m * 255).astype(np.uint8)).filter(ImageFilter.MinFilter(9))
+    a = np.asarray(img.filter(ImageFilter.GaussianBlur(blur)), np.float32)[..., None] / 255.0
+    return a * person if person is not None else a
 
 
 def _person_alpha(mask_file: Path | None, w: int, h: int, grow: int) -> Any:
@@ -828,14 +980,21 @@ def effect_end(
 def compose(
     source: Path, gen: Path, dest: Path, sheet: Path, *, dur_ms: int, size: tuple[int, int],
     masks: Path | None, protect: bool, gen_masks: Path | None = None, extend_ms: int = 0,
+    mode: str | None = None, faces: list[list[float]] | None = None,
 ) -> dict[str, Any]:  # fmt: skip
-    """Clip finale (dur_ms) = AI allineata e colorata, con la persona vera sopra se protect.
+    """Clip finale (dur_ms) = AI allineata e colorata, con sopra la parte vera scelta da mode:
+    person = tutta la persona (effetti attorno), head = solo la testa (vestiti/oggetti; serve
+    faces), none = niente (trasformazione). Senza mode decide protect.
 
     gen_masks = sagoma della persona nella clip AI (a 30 fps): dove l'AI ha disegnato la persona
     un po' più grande o spostata si usa la ripresa vera, così non spuntano capelli "doppi"."""
     import numpy as np
     from PIL import Image
 
+    mode = mode or ("person" if protect else "none")
+    if mode == "head" and not faces:
+        raise VfxError("volto non trovato nella clip: non posso proteggere la testa")
+    protect = mode == "person"
     w, h = size
     n = max(1, round(dur_ms / 1000 * FPS))
     tags = color_tags(source)
@@ -851,8 +1010,12 @@ def compose(
     ] if mfiles else None  # fmt: skip
     if w_small and any(x is None for x in w_small):
         w_small = None
+    # tempo: sempre sulla persona (bocca e mani si muovono; lo sfondo fermo non dice nulla: sulla
+    # faccia verde dava 7 fotogrammi di ritardo, labiale fuori sincrono). Colore: se la persona
+    # cambia (vestiti, trasformazione) si misura sullo sfondo, che resta uguale.
     k = best_offset(s_small, g_small, w_small)
-    gain, off = color_transfer(s_small, g_small, w_small, k)
+    c_w = [1.0 - x for x in w_small] if w_small and mode != "person" else w_small
+    gain, off = color_transfer(s_small, g_small, c_w, k)
     # ricostruzione dietro la persona SOLO nei fotogrammi dove la testa AI si è spostata (testa
     # fantasma): altrove la creatura che ti tocca (es. il drago che entra) verrebbe cancellata
     ghost: set[int] = set()
@@ -932,6 +1095,10 @@ def compose(
                     edge = np.clip(a * (1.0 - a) * 4.0, 0.0, 1.0)
                     lw = 1.0 + (rmap - 1.0) * edge * 0.8
                     gf = plate * (1 - a) + np.clip(sf * lw, 0, 255) * a
+            elif mode == "head" and faces:
+                pa = _person_alpha(mfiles[i] if i < len(mfiles) else None, w, h, 0)
+                a = head_alpha(faces[min(i, len(faces) - 1)], pa, w, h)
+                gf = gf * (1 - a) + sf * a
             wt = min(1.0, (i + 1) / FADE_FRAMES, (n - i) / FADE_FRAMES)
             out = np.clip(sf * (1 - wt) + gf * wt, 0, 255).astype(np.uint8)
             writer.write(out)
@@ -948,7 +1115,7 @@ def compose(
         board.paste(Image.fromarray(b_).resize((tw, th)), (c * tw, th))
     board.save(sheet, quality=88)
     return {"offset_frames": k, "dur_ms": round(n / FPS * 1000), "requested_frames": n_req,
-            "rebuilt_frames": len(ghost),
+            "rebuilt_frames": len(ghost), "protect": mode,
             "gain": [round(float(x), 3) for x in gain],
             "offset": [round(float(x), 1) for x in off], "frames": n}  # fmt: skip
 
@@ -961,8 +1128,10 @@ def run_shot(
     fetch: Callable[[str, Path], None] = download,
     masks_fn: Callable[[Path], tuple[Path, int]] | None = None,
     source_fn: Callable[..., Path] | None = None,
+    faces_fn: Callable[[Path], list[Any]] | None = None,
 ) -> Shot:  # fmt: skip
-    """Esegue tutto il flusso di un colpo, aggiornando vfx.json fase per fase."""
+    """Esegue tutto il flusso di un colpo, aggiornando vfx.json fase per fase. In automatico
+    Claude può fermarsi con delle domande (status "asking", nessun credito speso)."""
     from .render.preview import ensure_source
 
     shot = get(project_dir, shot_id)
@@ -1005,46 +1174,85 @@ def run_shot(
             words = [w.text for w in tl.words if w.kind == "word"
                      and shot.start_ms <= w.start_ms < shot.start_ms + shot.dur_ms]  # fmt: skip
             raw = agent.ask_skill(plan_request(shot, frame, " ".join(words), portrait, size))
+            questions = [
+                str(q).strip()[:200] for q in (raw.get("questions") or []) if str(q).strip()
+            ]
             plan = {
                 "prompt": str(raw.get("prompt", "")).strip(),
+                "recipe": str(raw.get("recipe") or "effect"),
                 "protect_person": bool(raw.get("protect_person", shot.protect)) and shot.protect,
                 "reference_image": raw.get("reference_image") or None,
                 "risk": str(raw.get("risk", ""))[:400],
                 "title": str(raw.get("title", ""))[:60],
             }
+            if questions and shot.quality == "auto" and not shot.asked:
+                # prima di spendere: Claude chiede ciò che manca (nessun credito usato)
+                plan["questions"] = questions[:3]
+                return edit(project_dir, shot_id, status="asking", phase="questions",
+                            log=PHASES["questions"], plan=plan,
+                            title=plan["title"] or shot.title, error=None)  # fmt: skip
             if len(plan["prompt"]) < 40:
                 raise VfxError("Claude non ha scritto un prompt valido")
-        protect = bool(plan.get("protect_person", shot.protect))
-        edit(project_dir, shot_id, plan=plan, title=plan.get("title") or shot.title)
+        recipe = recipe_of(shot, plan)
+        rc = RECIPES[recipe]
+        quality = AUTO_EFFECT_QUALITY if shot.quality == "auto" else shot.quality
+        if recipe == "effect":
+            pmode = "person" if plan.get("protect_person", shot.protect) else "none"
+        else:
+            pmode = rc["protect"] if shot.protect or rc["protect"] == "none" else "none"
+        protect = pmode == "person"
+        genjutsu = rc.get("job") == GENJUTSU_JOB  # outfit: Genjutsu; effect e transform: Seedance
+        plan = {**plan, "recipe": recipe, "recipe_label": rc["label"], "protect_mode": pmode}
+        edit(project_dir, shot_id, plan=plan, recipe=recipe, title=plan.get("title") or shot.title)
 
         ref = None
         ref_cost = 0.0
         ref_spec = plan.get("reference_image")
+        if recipe != "effect" and not (isinstance(ref_spec, dict) and ref_spec.get("prompt")):
+            raise VfxError(
+                "per questa ricetta serve l'immagine di riferimento (vestito, oggetto o personaggio)"
+            )
         if isinstance(ref_spec, dict) and ref_spec.get("prompt"):
             ref = d / "ref.png"
             if not ref.exists():
                 step("reference")
-                ref_cost = 0.12
-                data = hf(["generate", "create", REF_MODEL, "--aspect_ratio", "1:1",
-                           "--prompt", str(ref_spec["prompt"]), "--wait", "--json"])  # fmt: skip
+                ref_cost = rc["ref_cost"]
+                rargs = [rc["ref_job"], *rc["ref_args"], "--prompt", str(ref_spec["prompt"])]
+                if rc.get("ref_from_frame"):
+                    rargs += ["--image-references", str(frame), "--aspect_ratio", aspect]
+                try:
+                    data = hf(["generate", "create", *rargs, "--wait", "--json"])
+                except VfxError as exc:
+                    if BLOCKED not in str(exc) or rc["ref_job"] == REF_MODEL:
+                        raise
+                    # filtro: si riprova con Soul 2.0 (fotografico, meno severo), 0,12 crediti
+                    ref_cost = 0.12
+                    data = hf(["generate", "create", REF_MODEL, "--aspect_ratio", "3:4",
+                               "--prompt", str(ref_spec["prompt"]), "--wait", "--json"])  # fmt: skip
                 url = result_url(data)
                 if not url:
                     raise VfxError("Higgsfield non ha restituito l'immagine di riferimento")
                 fetch(url, ref)
 
         step("cost")
-        via_api = bool(QUALITIES[shot.quality].get("api"))
+        via_api = bool(QUALITIES[quality].get("api")) and recipe == "effect"
         usd = 0.0
         if via_api:  # API a consumo: niente crediti del piano, si paga in dollari
             credits = 0.0
-            usd = api_usd(shot.quality, size, GEN_MS / 1000)
+            usd = api_usd(quality, size, GEN_MS / 1000)
             if usd > API_MAX_USD:
                 raise VfxError(f"costerebbe circa {usd:g} $ (tetto {API_MAX_USD:g} $): non genero")
         else:
-            args = video_args(shot.quality, plan["prompt"], clip, ref, aspect, frame, end_frame)
+            if not genjutsu:
+                args = video_args(quality, plan["prompt"], clip, ref, aspect, frame, end_frame)
+                base = QUALITIES[quality]["credits"]
+            else:
+                assert ref is not None
+                args = genjutsu_args(plan["prompt"], clip, ref)
+                base = rc["credits"]
             est = hf(["generate", "cost", *args, "--json"])
             credits = float(est.get("credits", 0)) if isinstance(est, dict) else 0.0
-            cap = max(MAX_CREDITS, QUALITIES[shot.quality]["credits"] * 1.15)
+            cap = max(MAX_CREDITS, base * 1.15)
             if credits > cap:
                 raise VfxError(f"costerebbe {credits:g} crediti (tetto {cap:g}): non genero")
 
@@ -1054,6 +1262,8 @@ def run_shot(
         def _matte() -> None:
             try:
                 mres["masks"] = (masks_fn or rvm_matte)(source)[0]
+                if pmode == "head":
+                    mres["faces"] = smooth_boxes((faces_fn or face_boxes)(source))
             except Exception as exc:  # noqa: BLE001 - riportato sotto
                 mres["error"] = exc
 
@@ -1062,7 +1272,7 @@ def run_shot(
 
         step("generate")
         if via_api:
-            url = api_generate(shot.quality, plan["prompt"], clip, ref)
+            url = api_generate(quality, plan["prompt"], clip, ref)
         else:
             data = hf(["generate", "create", *args, "--wait", "--wait-timeout", "25m", "--json"])
             url = result_url(data)
@@ -1077,7 +1287,7 @@ def run_shot(
         )
         fetch(url, gen)
 
-        if QUALITIES[shot.quality].get("upscale"):
+        if genjutsu or QUALITIES[quality].get("upscale"):
             # Seedance a 720p sul piano Starter -> 1080p prima del composito (se non riesce,
             # si va avanti con la clip a 720p: meglio una clip che nessuna)
             step("upscale")
@@ -1102,16 +1312,23 @@ def run_shot(
         step("masks")
         mt.join()
         masks = mres.get("masks")
-        if masks is None and protect:
+        faces = mres.get("faces")
+        if masks is None and pmode != "none":
             raise VfxError(f"sagoma della persona non riuscita: {mres.get('error')}")
-        # come fanno gli altri: se Seedance ha tenuto la persona fedele, la clip AI si usa così
-        # com'è (niente ritaglio, niente bordi); se l'ha ridisegnata, si rimette quella vera
-        fid = person_fidelity(source, gen, masks) if masks is not None else None
-        mode = "direct"
-        if protect and (fid is None or fid["median"] > FIDELITY_OK or fid["p90"] > FIDELITY_OK_P90):
-            mode = "protected"
-        protect = mode == "protected"
-        plan = {**plan, "mode": mode, "fidelity": fid}
+        if pmode == "head" and not faces:
+            raise VfxError(f"volto non trovato: {mres.get('error') or 'nessun volto nella clip'}")
+        fid = None
+        if pmode == "person":
+            # come fanno gli altri: se Seedance ha tenuto la persona fedele, la clip AI si usa
+            # così com'è (niente ritaglio); se l'ha ridisegnata, si rimette quella vera
+            fid = person_fidelity(source, gen, masks) if masks is not None else None
+            if fid is not None and fid["median"] <= FIDELITY_OK and fid["p90"] <= FIDELITY_OK_P90:
+                pmode = "none"
+            mode = "protected" if pmode == "person" else "direct"
+        else:
+            mode = {"head": "head", "none": "direct"}[pmode]
+        protect = pmode == "person"
+        plan = {**plan, "mode": mode, "fidelity": fid, "protect_mode": pmode}
         if protect and masks is not None:
             gen30 = d / f"gen30-{shot.attempt}.mp4"  # stessa cadenza del composito
             _run([_ffmpeg(), "-v", "error", "-y", "-i", str(gen), "-an", "-vf",
@@ -1126,14 +1343,16 @@ def run_shot(
         final = d / f"final-{shot.attempt}.mp4"
         sheet = d / f"sheet-{shot.attempt}.jpg"
         asked = shot.asked_ms or shot.dur_ms
+        # solo l'effetto si allunga fin dove finisce; vestiti e trasformazioni durano quanto chiesto
         info = compose(source, gen, final, sheet, dur_ms=asked, size=size, masks=masks,
-                       protect=protect, gen_masks=gen_masks, extend_ms=GEN_MS)  # fmt: skip
+                       protect=protect, gen_masks=gen_masks,
+                       extend_ms=0 if genjutsu else GEN_MS, mode=pmode, faces=faces)  # fmt: skip
         edit(project_dir, shot_id, final=final.name, sheet=sheet.name,
              dur_ms=max(asked, info["dur_ms"]), plan={**plan, "compose": info})  # fmt: skip
 
         step("review")
         try:
-            rv = agent.ask_skill(review_request(shot, sheet, plan["prompt"], protect))
+            rv = agent.ask_skill(review_request(shot, sheet, plan["prompt"], pmode))
             review = {
                 "verdict": rv.get("verdict")
                 if rv.get("verdict") in ("ok", "retry", "fail")
@@ -1150,6 +1369,16 @@ def run_shot(
         return edit(project_dir, shot_id, status="done", phase="done", log=PHASES["done"],
                     review=review, error=None)  # fmt: skip
     except Exception as exc:
+        if BLOCKED in str(exc) and not get(project_dir, shot_id).note:
+            # una volta sola: Claude riscrive tutto senza nomi protetti e si riprova (il credito
+            # del job bloccato torna indietro)
+            (d / "ref.png").unlink(missing_ok=True)
+            edit(project_dir, shot_id, note=BLOCK_NOTE, plan={}, fix_prompt=None, phase="plan",
+                 log="bloccata dal filtro: Claude riscrive senza nomi protetti")  # fmt: skip
+            return run_shot(
+                project_dir, shot_id, tl=tl, agent=agent, hf=hf, fetch=fetch, masks_fn=masks_fn,
+                source_fn=source_fn, faces_fn=faces_fn,
+            )  # fmt: skip
         return edit(
             project_dir, shot_id, status="error", error=str(exc)[:500] or exc.__class__.__name__
         )
@@ -1162,6 +1391,18 @@ def retry(project_dir: Path, shot_id: str, use_fix: bool) -> Shot:
     fix = (s.review.get("fix_prompt") or None) if use_fix else None
     return edit(project_dir, shot_id, status="running", phase="clip", error=None,
                 attempt=s.attempt + 1, fix_prompt=fix, review={}, enabled=False)  # fmt: skip
+
+
+def answer(project_dir: Path, shot_id: str, answers: list[str]) -> Shot:
+    """Il creator risponde alle domande di Claude (o lascia vuoto = «genera così»): si riparte
+    dal piano, senza altre domande."""
+    s = get(project_dir, shot_id)
+    if s.status != "asking":
+        raise VfxError("questa clip non sta aspettando risposte")
+    qs = s.plan.get("questions") or []
+    pairs = [f"{q} -> {a.strip()}" for q, a in zip(qs, answers, strict=False) if a.strip()]
+    return edit(project_dir, shot_id, status="running", phase="plan", error=None,
+                answers=pairs, asked=True, plan={})  # fmt: skip
 
 
 # --- dentro il render ----------------------------------------------------------------------

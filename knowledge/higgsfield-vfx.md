@@ -18,6 +18,19 @@ Academy "Add AI VFX to Real Footage" / "Mix AI & Real Footage" (lezioni gratuite
 6. Bozza 480p (draft) -> scegli -> 1080p identico via draft_job_id (metà crediti).
 7. Ogni take si rivede: azione, continuità, camera. Errore che ritorna = sistema asset/prompt, non ritentare a caso.
 
+## Le 5 domande del regista (regola del creator, per OGNI immagine e video)
+1. Camera: con cosa è girato (iPhone a mano, cavalletto, cinepresa 35 mm, drone), inquadratura,
+   angolo, movimento, profondità di campo. Nell'edit = sempre la camera della ripresa vera.
+2. Tono: l'emozione che deve arrivare (meraviglia, minaccia, ironia...): decide ritmo ed energia.
+3. Chi, cosa, perché: chi c'è, cosa succede in che ordine e PERCHÉ (la motivazione rende
+   credibile il movimento).
+4. Luce: naturale, pratica calda, cinematografica, golden hour, neon cyberpunk; direzione,
+   calore, contrasto; quale luce aggiunge l'elemento nuovo.
+5. Texture e interazione: materiali precisi e come ogni elemento tocca la scena (ombre di
+   contatto, occlusione, riflessi, polvere, vento sui capelli).
+Keyword tecniche vere (medium close-up, 35mm, dolly-in, rim light, volumetric haze, film grain);
+niente parole vuote ("epic", "8K masterpiece").
+
 ## Struttura prompt (Seedance / Academy)
 Primo 20% del prompt pesa di più.
 1. SCENE CONTEXT & STYLE - cosa succede, stile, fisica del mondo.
