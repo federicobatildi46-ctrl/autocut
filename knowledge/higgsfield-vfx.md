@@ -119,6 +119,15 @@ Riparazione: "Revise the tested prompt... What went wrong / What I want / keep w
   vengono dalla conversione 24 -> 30 fps). Verifica obbligatoria prima di accusare il modello:
   confrontare la clip grezza con il risultato negli stessi istanti.
 
+## Upscale (2026-11-10)
+- Il piano Starter arriva a 720p. Dopo la generazione: `bytedance_video_upscale` 1080p, preset
+  `aigc`, fps 24 (circa 1-2 crediti): più nitido e coerente nel tempo, conserva la texture.
+- Real-ESRGAN General x4v3 in locale (ONNX su CPU, pesi Qualcomm BSD-3): ~30 s a fotogramma su
+  questo portatile e scaglie "di plastica": scartato. L'eseguibile ncnn-vulkan scaricato non è
+  stato eseguito (bloccato come codice esterno).
+- La persona nel composito è la ripresa vera a 1080p: l'upscale serve solo alla parte AI.
+- 4K non serve: l'editor esporta 1080x1920.
+
 ## Anti-slop
 Texture plastiche, nitidezza eccessiva, pattern ripetuti, riflessi distraenti, ombre nere senza dettaglio,
 volti "medi" idealizzati. Profondità: elemento in primo piano sfocato. Luce leggibile (direzione coerente col frame).

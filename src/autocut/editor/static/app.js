@@ -3339,7 +3339,7 @@ function wireVfxPanel(box) {
       case "fix": await mutate(`/api/vfx/${id}/retry`, { use_fix: true }, "Rigenero con la correzione"); break;
       case "again": await mutate(`/api/vfx/${id}/retry`, { use_fix: false }, "Rigenero una nuova versione"); break;
       case "del":
-        if (confirm("Eliminare questa clip AI? I file generati vengono cancellati.")) await mutate(`/api/vfx/${id}/delete`, {}, "Clip AI eliminata");
+        if (confirm("Togliere questa clip AI dall'elenco? I file vanno nel cestino del progetto (work/vfx/_cestino), non vengono cancellati.")) await mutate(`/api/vfx/${id}/delete`, {}, "Clip AI spostata nel cestino");
         break;
     }
   });

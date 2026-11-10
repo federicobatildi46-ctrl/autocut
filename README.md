@@ -196,9 +196,14 @@ reinventa da un fotogramma:
    sola fino a dove l'effetto finisce davvero (max 4 s), poi dissolvenza;
 5. Claude rivede il prima/dopo (ok / da correggere con prompt corretto / non va bene).
 
+Con la qualità *Migliore sul piano Starter* la clip AI a 720p viene portata a 1080p con
+l'upscaler ByteDance di Higgsfield (preset `aigc`, ~1-2 crediti) prima del composito.
+*Elimina* sposta i file della clip nel cestino del progetto (`work/vfx/_cestino/`), non li
+cancella.
+
 Poi *Metti in timeline*: la clip compare nella traccia ✦, si vede nell'anteprima e il render la
 cuce dentro il video (la voce è sempre l'originale). *Rigenera corretta* usa il prompt sistemato
-da Claude. Costo tipico: ~4 crediti a tentativo (*Economica*: ~2). Studio e regole in
+da Claude. Costo tipico: ~12 crediti a tentativo con la ricetta Starter 720p + upscale (*Bozza 480p*: ~4). Studio e regole in
 `knowledge/higgsfield-vfx.md`. File in `projects/<nome>/vfx.json` e `work/vfx/<id>/`.
 
 ### Pannello Effetti

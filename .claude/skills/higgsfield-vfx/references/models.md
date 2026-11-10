@@ -18,3 +18,11 @@ Nano Banana = more "AI look".
 
 Never: image-to-video from a still of the creator (re-animates his face and invents speech),
 generated audio on footage where he talks.
+
+## Recipe that produced the creator's "perfect" clip (2026-11-10, Starter plan)
+
+`seedance_2_0` mode `fast` 720p, 4 s, audio off, real clip as video reference, real first and last
+frames as start/end image, Soul 2.0 reference image -> `bytedance_video_upscale` 1080p preset
+`aigc` (~1-2 credits) -> local composite (real person on top, RVM). About 12 credits per take,
+perfect by the third take. Local Real-ESRGAN (ONNX, CPU) was tested and rejected: ~30 s per frame
+on this laptop and "plastic" scales.

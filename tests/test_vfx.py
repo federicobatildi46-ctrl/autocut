@@ -15,8 +15,9 @@ needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="serve ffmpeg")
 
 
 def _clip(path, size="1080x1920", dur=4, color="testsrc2"):
+    sep = "" if color.endswith(":") else "="
     subprocess.run(
-        [FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"{color}{'' if color.endswith(':') else '='}s={size}:r=30:d={dur}",
+        [FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"{color}{sep}s={size}:r=30:d={dur}",
          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)],
         check=True,
     )  # fmt: skip
@@ -67,7 +68,9 @@ def test_add_validates_and_numbers(tmp_path):
     assert s.id == "vfx_001" and s.dur_ms == vfx.MAX_EFFECT_MS and s.request == "drago"
     assert vfx.add(tmp_path, start_ms=0, dur_ms=1000, request="x", camera_ms=10000).id == "vfx_002"
     with pytest.raises(vfx.VfxError):
-        vfx.add(tmp_path, start_ms=7000, dur_ms=1000, request="x", camera_ms=10000)  # < 4 s alla fine
+        vfx.add(
+            tmp_path, start_ms=7000, dur_ms=1000, request="x", camera_ms=10000
+        )  # < 4 s alla fine
     with pytest.raises(vfx.VfxError):
         vfx.add(tmp_path, start_ms=0, dur_ms=1000, request="  ", camera_ms=10000)
 
@@ -169,14 +172,25 @@ def test_api_create_enable_delete(tmp_path):
     p = c.post("/api/vfx", json={"start_ms": 0, "dur_ms": 2000, "request": "drago"}).json()
     shot = p["vfx"]["shots"][0]
     assert ran == [shot["id"]] and shot["status"] == "running" and p["vfx"]["max_ms"] == 3000
-    assert c.post("/api/vfx", json={"start_ms": 0, "dur_ms": 2000, "request": "x"}).status_code == 409
-    assert c.post(f"/api/vfx/{shot['id']}/enable", json={"enabled": True}).status_code == 400  # non pronta
+    assert (
+        c.post("/api/vfx", json={"start_ms": 0, "dur_ms": 2000, "request": "x"}).status_code == 409
+    )
+    assert (
+        c.post(f"/api/vfx/{shot['id']}/enable", json={"enabled": True}).status_code == 400
+    )  # non pronta
     vfx.edit(pdir, shot["id"], status="done", final="final-1.mp4")
     p = c.post(f"/api/vfx/{shot['id']}/enable", json={"enabled": True}).json()
-    assert p["vfx"]["shots"][0]["enabled"] and p["vfx"]["shots"][0]["final_url"].endswith("final-1.mp4")
+    assert p["vfx"]["shots"][0]["enabled"] and p["vfx"]["shots"][0]["final_url"].endswith(
+        "final-1.mp4"
+    )
     assert c.get(f"/media/vfx/{shot['id']}/..%2Ftimeline.json").status_code == 404
+    vfx.shot_dir(pdir, shot["id"]).mkdir(parents=True, exist_ok=True)
+    (vfx.shot_dir(pdir, shot["id"]) / "final-1.mp4").write_bytes(b"x")
     p = c.post(f"/api/vfx/{shot['id']}/delete").json()
     assert p["vfx"]["shots"] == []
+    trash = list((pdir / "work" / "vfx" / vfx.TRASH_DIR).glob(f"{shot['id']}-*"))
+    assert len(trash) == 1 and (trash[0] / "final-1.mp4").is_file()  # nel cestino, non perso
+    assert (trash[0] / "shot.json").is_file()
 
 
 def test_effect_end_finds_when_the_ai_element_leaves():
@@ -189,3 +203,34 @@ def test_effect_end_finds_when_the_ai_element_leaves():
     one, zero = np.ones(3, np.float32), np.zeros(3, np.float32)
     assert vfx.effect_end(src, gen, None, 0, one, zero) == 13
     assert vfx.effect_end(src, [x.copy() for x in src], None, 0, one, zero) is None
+
+
+@needs_ffmpeg
+def test_starter_quality_upscales_the_ai_clip_before_compositing(tmp_path):
+    raw = _clip(tmp_path / "raw.mp4")
+    source = _clip(tmp_path / "source.mp4")
+    gen_src = _clip(tmp_path / "gen.mp4", size="720x1280", color="smptebars")
+    calls = []
+
+    def hf(args):
+        calls.append(args)
+        if args[:2] == ["generate", "cost"]:
+            return {"credits": 2 if vfx.UPSCALE_JOB in args else 10}
+        if vfx.UPSCALE_JOB in args:
+            return {"result_url": "https://cdn/gen-1080.mp4"}
+        return {"result_url": "https://cdn/gen.mp4"}
+
+    plan = {**FakeAgent().plan, "reference_image": None}
+    s = vfx.add(
+        tmp_path, start_ms=0, dur_ms=1000, request="drago", quality="hd720", camera_ms=10000
+    )
+    out = vfx.run_shot(
+        tmp_path, s.id, tl=_tl(raw), agent=FakeAgent(plan=plan), hf=hf,
+        fetch=lambda url, dest: shutil.copy(gen_src, dest),
+        masks_fn=lambda src: _masks(tmp_path / f"m-{src.stem}"), source_fn=lambda *a, **k: source,
+    )  # fmt: skip
+    assert out.status == "done", out.error
+    up = next(a for a in calls if a[:2] == ["generate", "create"] and vfx.UPSCALE_JOB in a)
+    assert up[up.index("--preset") + 1] == "aigc" and up[up.index("--resolution") + 1] == "1080p"
+    assert out.plan["upscaled"] is True and out.credits == pytest.approx(12)
+    assert (vfx.shot_dir(tmp_path, s.id) / "gen-1-1080.mp4").is_file()

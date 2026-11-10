@@ -49,8 +49,8 @@ QUALITIES: dict[str, dict[str, Any]] = {
                "resolution": "720p", "usd_per_ktok": 0.01284, "credits": 0},
     "api1080": {"label": "API Seedance 2.5 Edit 1080p (~5,5 $)", "api": "bytedance/seedance-2.5/video-edit",
                 "resolution": "1080p", "usd_per_ktok": 0.01404, "credits": 0},
-    "hd720": {"label": "Migliore sul piano Starter 720p", "job": "seedance_2_0", "credits": 10,
-              "args": ["--mode", "fast", "--resolution", "720p"]},
+    "hd720": {"label": "Migliore sul piano Starter: 720p + upscale 1080p", "job": "seedance_2_0",
+              "credits": 12, "upscale": True, "args": ["--mode", "fast", "--resolution", "720p"]},
     "hd": {"label": "Finale 1080p (piano Pro/Ultimate)", "job": "seedance_2_0", "credits": 48,
            "args": ["--mode", "std", "--resolution", "1080p"]},
     "uhd": {"label": "Finale 4K (piano Pro/Ultimate, consigliata)", "job": "seedance_2_0", "credits": 88,
@@ -67,6 +67,7 @@ PHASES = {
     "cost": "controllo i crediti",
     "generate": "Seedance genera la clip (qualche minuto)",
     "download": "scarico il risultato",
+    "upscale": "porto la clip AI a 1080p (ByteDance, ~1-2 crediti)",
     "masks": "ritaglio la tua sagoma (in locale)",
     "compose": "allineo, coloro e fondo nel video",
     "review": "Claude rivede il risultato",
@@ -173,12 +174,28 @@ def add(
     return shot
 
 
-def remove(project_dir: Path, shot_id: str) -> None:
+TRASH_DIR = "_cestino"
+
+
+def remove(project_dir: Path, shot_id: str) -> Path | None:
+    """Toglie la clip dall'elenco; i suoi file vanno nel cestino (work/vfx/_cestino/), non
+    vengono cancellati: una clip costa crediti e una cancellazione per sbaglio è già successa.
+    Il suo vfx.json resta accanto ai file, così la clip si può rimettere."""
     with _LOCK:
         data = load(project_dir)
+        gone = [s for s in data.shots if s.id == shot_id]
         data.shots = [s for s in data.shots if s.id != shot_id]
         save(project_dir, data)
-    shutil.rmtree(shot_dir(project_dir, shot_id), ignore_errors=True)
+    src = shot_dir(project_dir, shot_id)
+    if not src.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = src.parent / TRASH_DIR / f"{shot_id}-{stamp}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+    if gone:
+        (dest / "shot.json").write_text(gone[0].model_dump_json(indent=2), encoding="utf-8")
+    return dest
 
 
 def shot_dir(project_dir: Path, shot_id: str) -> Path:
@@ -313,6 +330,17 @@ def api_generate(quality: str, prompt: str, clip: Path, ref: Path | None) -> str
     if not url:
         raise VfxError(f"l'API non ha restituito il video: {str(res)[:200]}")
     return url
+
+
+UPSCALE_JOB = "bytedance_video_upscale"  # preset "aigc": pensato per i video generati dall'AI
+
+
+def upscale_args(gen: Path, portrait: bool) -> list[str]:
+    """Upscaler video ByteDance su Higgsfield: coerente nel tempo, conserva la texture (provato
+    contro Real-ESRGAN in locale: quello rende le scaglie "di plastica" e impiega ~30 s a
+    fotogramma su questo PC). La persona nel composito è già la ripresa vera a 1080p."""
+    return [UPSCALE_JOB, "--video-references", str(gen), "--resolution", "1080p",
+            "--preset", "aigc", "--model_version", "standard", "--fps", "24"]  # fmt: skip
 
 
 def video_args(
@@ -1048,6 +1076,27 @@ def run_shot(
             usd=round(cur.usd + usd, 2),
         )
         fetch(url, gen)
+
+        if QUALITIES[shot.quality].get("upscale"):
+            # Seedance a 720p sul piano Starter -> 1080p prima del composito (se non riesce,
+            # si va avanti con la clip a 720p: meglio una clip che nessuna)
+            step("upscale")
+            up = d / f"gen-{shot.attempt}-1080.mp4"
+            try:
+                uargs = upscale_args(gen, portrait)
+                est = hf(["generate", "cost", *uargs, "--json"])
+                ucost = float(est.get("credits", 0)) if isinstance(est, dict) else 0.0
+                if ucost <= 4:
+                    uurl = result_url(hf(["generate", "create", *uargs, "--wait",
+                                          "--wait-timeout", "15m", "--json"]))  # fmt: skip
+                    if uurl:
+                        fetch(uurl, up)
+                        gen = up
+                        cur = get(project_dir, shot_id)
+                        edit(project_dir, shot_id, credits=round(cur.credits + ucost, 2))
+            except Exception as exc:  # noqa: BLE001 - l'upscale è un miglioramento facoltativo
+                plan = {**plan, "upscale_error": str(exc)[:200]}
+            plan = {**plan, "upscaled": gen == up}
 
         gen_masks = None
         step("masks")
