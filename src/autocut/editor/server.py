@@ -16,24 +16,27 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import re
 import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .. import audio_mix as amix
+from .. import broll as brl
 from .. import covers as cov
 from .. import effects as fx
 from .. import emoji as emo
 from .. import filters as flt
 from .. import images as imgs
 from .. import manual_cuts as cutmod
+from .. import music as mus
 from .. import popups as pops
 from .. import text_style as txt
 from .. import vfx as vfxmod
@@ -46,8 +49,10 @@ from ..overrides.resolve import effective_ranges, kept_ms
 from ..paths import REPO_ROOT, TIMELINE_FILE
 from ..render.preview import LIBRARY_DIR, _catalog, sfx_loudness
 from ..styles import StyleError, StylePreset, list_styles, resolve_look
+from . import importer as imp
 from .agent import AgentError, ClaudeAgent
 from .ai_jobs import AiQueue
+from .assistant import Assistant, AssistantError, run_claude
 from .history import History, HistoryError
 from .media import EditorMedia
 
@@ -191,6 +196,46 @@ class VfxEnableBody(BaseModel):
     enabled: bool
 
 
+class MusicSuggestBody(BaseModel):
+    start_ms: int | None = Field(default=None, ge=0)  # tratto del raw (None = tutto il video)
+    end_ms: int | None = Field(default=None, ge=0)
+    note: str = Field(default="", max_length=500)  # es. «più energica», «niente lo-fi»
+
+
+class MusicItemBody(BaseModel):
+    action: str  # use | update | remove
+    id: str | None = None  # voce di music.json (update/remove)
+    track: str | None = None  # brano (use)
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class MusicDownloadBody(BaseModel):
+    id: str = Field(pattern=r"^[\w-]{11}$")
+
+
+class AssistantBody(BaseModel):
+    mode: str = "edit"  # edit = edita il video, dev = modifica l'editor
+    prompt: str = Field(default="", max_length=4000)  # può mancare se c'è un'immagine
+    selection: dict[str, Any] | None = None  # start_ms/end_ms o frame_ms + didascalie
+    images: list[str] = Field(default=[], max_length=4)  # screenshot incollati (data URL)
+
+
+class ImportPathBody(BaseModel):
+    path: str
+
+
+class ImportOpenBody(BaseModel):
+    project: str
+
+
+class VersionBody(BaseModel):
+    name: str = Field(default="", max_length=60)
+
+
+class BrollEditBody(BaseModel):
+    fields: dict[str, Any]  # at_ms, duration_ms, src_ms, gain_db, mute_camera, enabled, name
+
+
 class FilterBody(BaseModel):
     preset: str | None = None
     values: dict[str, float] = {}
@@ -251,11 +296,23 @@ def create_app(
     cover_still: Any = None,  # test: render Remotion finto
     export_runner: Any = None,  # test: render finto del video intero
     vfx_runner: Any = None,  # test: esegue subito il lavoro «Genera con Higgsfield» (finto)
+    music_root: Path | None = None,  # test: libreria musica finta
+    music_run: Any = None,  # test: yt-dlp finto
+    music_lufs: Any = None,  # test: loudness finta
+    music_threaded: bool = True,  # test: False = la scelta lavora dentro la richiesta
     cover_grab: Any = None,  # test: fotogramma finto
+    claude_runner: Any = None,  # test: Claude Code finto per «Chiedi a Claude»
+    assistant_threaded: bool = True,  # test: False = la chat lavora dentro la richiesta
+    assistant_git: bool = True,  # test: False = niente fotografia git (modalità Sviluppa)
+    restart: Any = None,  # riavvio dell'editor dopo una modifica al codice (dal supervisore)
+    import_pipeline: Any = None,  # test: premontaggio finto (ingest + trascrizione + tagli)
+    import_threaded: bool = True,  # test: False = il premontaggio gira dentro la richiesta
+    import_roots: list[Path] | None = None,  # test: cartelle dove cercare i video scaricati
     brands_root: Path | None = None,
     styles_root: Path | None = None,
     repo_root: Path = REPO_ROOT,
     auto_popups: bool = False,
+    auto_music: bool = False,  # premontaggio: musica scelta da Claude appena c'è uno stile
     keepalive: bool = False,  # rinnova la sessione Higgsfield ogni 20 minuti
 ) -> FastAPI:
     app = FastAPI(title="autocut editor", docs_url=None, redoc_url=None)
@@ -275,7 +332,12 @@ def create_app(
     @app.middleware("http")
     async def track_history(request, call_next):
         path = request.url.path
-        if request.method != "POST" or not path.startswith("/api/") or path in no_history:
+        if (
+            request.method != "POST"
+            or not path.startswith("/api/")
+            or path in no_history
+            or path.startswith("/api/assistant")  # la chat registra da sé il suo Annulla
+        ):
             return await call_next(request)
         before = hist.snapshot()
         response = await call_next(request)
@@ -692,6 +754,511 @@ def create_app(
             raise HTTPException(404)
         return FileResponse(path)
 
+    # --- Importa un video raw (dal PC o da iCloud) e fai il premontaggio ---
+
+    projects_dir = project_dir.parent
+    raw_dir = repo_root / "raw"
+    import_job: dict[str, Any] = {"status": "idle"}
+    import_lock = threading.Lock()
+
+    def import_payload() -> dict[str, Any]:
+        return {**import_job, "phases": imp.PHASES, "can_open": restart is not None}
+
+    def start_import(video: Path, name: str) -> None:
+        def phase(p: str) -> None:
+            import_job.update(phase=p, label=imp.PHASES.get(p, p))
+
+        def job() -> None:
+            try:
+                (import_pipeline or imp.default_pipeline)(name, video, phase)
+                import_job.update(status="done", phase="done", label=imp.PHASES["done"])
+            except Exception as exc:  # noqa: BLE001 - l'errore va letto dal creator, non nel terminale
+                import_job.update(status="error", error=str(exc)[:600])
+
+        import_job.clear()
+        import_job.update(status="running", project=name, file=video.name, phase="ingest",
+                          label=imp.PHASES["ingest"], started=time.time())  # fmt: skip
+        if import_threaded:
+            threading.Thread(target=job, daemon=True).start()
+        else:
+            job()
+
+    @app.get("/api/import")
+    def import_status() -> JSONResponse:
+        return JSONResponse(import_payload())
+
+    @app.get("/api/import/candidates")
+    def import_candidates() -> JSONResponse:
+        roots = import_roots or imp.search_roots()
+        return JSONResponse({"items": imp.candidates(roots), "folders": [str(r) for r in roots]})
+
+    @app.post("/api/import/upload")
+    async def import_upload(request: Request, name: str) -> JSONResponse:
+        """Il video arriva come corpo grezzo (?name=IMG_0031.MOV): dal computer o da iCloud."""
+        if not imp.is_video(Path(name)):
+            raise HTTPException(400, "serve un video (mov, mp4, m4v, mkv, avi, webm)")
+        with import_lock:
+            if import_job.get("status") == "running":
+                raise HTTPException(409, "c'è già un import in corso: aspetta che finisca")
+            pname = imp.project_name_for(name, projects_dir)
+            dest = raw_dir / pname / brl.safe_name(name)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            import_job.clear()
+            import_job.update(status="running", project=pname, file=name, phase="copy",
+                              label=imp.PHASES["copy"], started=time.time())  # fmt: skip
+        size = 0
+        try:
+            with dest.open("wb") as fh:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > imp.MAX_BYTES:
+                        raise HTTPException(413, "video troppo grande")
+                    fh.write(chunk)
+            if size < imp.MIN_BYTES:
+                raise HTTPException(400, "file vuoto o segnaposto di iCloud non scaricato")
+        except BaseException:
+            dest.unlink(missing_ok=True)
+            import_job.clear()
+            import_job["status"] = "idle"
+            raise
+        start_import(dest, pname)
+        return JSONResponse(import_payload())
+
+    @app.post("/api/import/from-path")
+    def import_from_path(body: ImportPathBody) -> JSONResponse:
+        roots = import_roots or imp.search_roots()
+        try:
+            src = imp.check_source(Path(body.path), roots)
+        except imp.ImportError_ as exc:
+            raise fail(exc) from exc
+        with import_lock:
+            if import_job.get("status") == "running":
+                raise HTTPException(409, "c'è già un import in corso: aspetta che finisca")
+            pname = imp.project_name_for(src.name, projects_dir)
+            import_job.clear()
+            import_job.update(status="running", project=pname, file=src.name, phase="copy",
+                              label=imp.PHASES["copy"], started=time.time())  # fmt: skip
+        try:
+            dest = imp.stage_copy(src, raw_dir, pname, brl.safe_name(src.name))
+        except OSError as exc:
+            import_job.clear()
+            import_job["status"] = "idle"
+            raise HTTPException(400, f"non riesco a copiare il file: {exc}") from exc
+        start_import(dest, pname)
+        return JSONResponse(import_payload())
+
+    @app.post("/api/import/open")
+    def import_open(body: ImportOpenBody) -> JSONResponse:
+        pdir = projects_dir / body.project
+        if import_job.get("status") != "done" or import_job.get("project") != body.project:
+            raise HTTPException(409, "il premontaggio non è ancora finito")
+        if not (pdir / TIMELINE_FILE).is_file():
+            raise HTTPException(404, "progetto non trovato")
+        if restart is None:
+            raise HTTPException(
+                409, f"riavvio automatico non disponibile: chiudi l'editor e lancia "
+                     f"`autocut editor {body.project}`")  # fmt: skip
+        imp.request_open(projects_dir, body.project)
+        restart()
+        return JSONResponse({"restarting": True, "project": body.project})
+
+    # --- Salva / versioni: punti di ripristino con nome ---
+
+    @app.get("/api/versions")
+    def versions_list() -> JSONResponse:
+        return JSONResponse({"versions": hist.versions()})
+
+    @app.post("/api/versions")
+    def versions_save(body: VersionBody) -> JSONResponse:
+        hist.save_version(body.name)
+        return JSONResponse(payload())
+
+    @app.post("/api/versions/{vid}/restore")
+    def versions_restore(vid: str) -> JSONResponse:
+        try:
+            hist.restore_version(vid)  # il middleware lo mette nella pila: Annulla lo toglie
+        except HistoryError as exc:
+            raise fail(exc) from exc
+        return JSONResponse(payload())
+
+    @app.post("/api/versions/{vid}/delete")
+    def versions_delete(vid: str) -> JSONResponse:
+        try:
+            hist.delete_version(vid)
+        except HistoryError as exc:
+            raise fail(exc) from exc
+        return JSONResponse(payload())
+
+    # --- Musica di sottofondo dalla libreria gratuita Audio Library (YouTube) ----------
+
+    mroot = music_root or mus.MUSIC_DIR
+    mrun = music_run or mus.ytdlp
+    music_job: dict[str, Any] = {"status": "idle"}
+
+    def music_sound() -> dict[str, Any]:
+        lk = style_look()
+        return dict(lk["sound"]) if lk and lk.get("sound") else {}
+
+    def track_info(track_id: str) -> dict[str, Any] | None:
+        p = mroot / "tracks" / f"{track_id}.json"
+        if not p.exists():
+            return None
+        meta = json.loads(p.read_text(encoding="utf-8"))
+        have = mus.track_path(track_id, mroot).exists()
+        return {
+            "id": track_id, "song": meta.get("song"), "artist": meta.get("artist"),
+            "mood": meta.get("mood"), "uses": meta.get("uses"),
+            "duration_s": meta.get("duration_s"),
+            "credits": meta.get("credits", ""), "license": meta.get("license", ""),
+            "breakdown": meta.get("breakdown", []), "youtube": meta.get("url"),
+            "url": f"/media/music/{track_id}.m4a" if have else None, "lufs": meta.get("lufs"),
+        }  # fmt: skip
+
+    def music_payload() -> dict[str, Any]:
+        try:
+            data = mus.load(project_dir)
+        except ValueError:
+            return {"items": [], "error": "music.json non valido"}
+        sid = state().get("style")
+        snd = music_sound()
+        items = []
+        for it in data.items:
+            if not mus.visible(it, sid):
+                continue
+            info = track_info(it.track) or {"id": it.track}
+            items.append({**it.model_dump(), "track_info": info,
+                          "preview_db": mus.level_db(info, snd, it.gain_db)})  # fmt: skip
+        sug = data.suggestions.get(sid or "")
+        cands = []
+        if sug:
+            for c in sug.candidates:
+                info = track_info(c.id)
+                if info:
+                    cands.append({**c.model_dump(), "track_info": info,
+                                  "preview_db": mus.level_db(info, snd, 0.0)})  # fmt: skip
+        cat = mus.load_catalog(mroot)
+        return {
+            "items": items,
+            "suggestion": (
+                {**sug.model_dump(exclude={"candidates"}), "candidates": cands} if sug else None
+            ),
+            "job": {k: v for k, v in music_job.items() if not k.startswith("failed:")},
+            "credits": mus.credits_text(project_dir, sid, mroot),
+            "music_db": snd.get("music_db", -19.0), "style_music": snd.get("music", True),
+            "catalog_count": len(cat["tracks"]), "source": mus.CHANNEL,
+        }  # fmt: skip
+
+    def music_context(a: int | None, b: int | None) -> tuple[str, float]:
+        tl = timeline()
+        words = [w.text for w in tl.words if w.kind == "word"
+                 and (a is None or w.start_ms >= a) and (b is None or w.start_ms <= b)]  # fmt: skip
+        kept = kept_ms(eff_of(tl, overrides(tl))) if a is None else max(0, (b or 0) - a)
+        brief = ai_context()
+        return (f"{brief}\nParlato: {' '.join(words)[:5000]}", max(5.0, kept / 1000))
+
+    def run_music(
+        a: int | None, b: int | None, note: str, apply_top: bool, sid: str | None
+    ) -> None:
+        music_job.update(status="running", style=sid, message=None, progress="comincio")
+        try:
+            context, seconds = music_context(a, b)
+            vibe, cands = mus.suggest(
+                ask=ai.agent.ask_json, context=context, style=sid, seconds=seconds, note=note,
+                root=mroot, run=mrun, lufs=music_lufs,
+                progress=lambda m: music_job.update(progress=m),
+            )  # fmt: skip
+            data = mus.load(project_dir)
+            sugs = dict(data.suggestions)
+            sugs[sid or ""] = mus.Suggestion(vibe=vibe, start_ms=a, end_ms=b, candidates=cands,
+                                             created_at=mus._now())  # fmt: skip
+            data = data.model_copy(update={"suggestions": sugs})
+            if apply_top and sid and sid not in data.auto_done:  # premontaggio fatto per lo stile
+                data = data.model_copy(update={"auto_done": [*data.auto_done, sid]})
+            msg = f"{len(cands)} brani per il mood «{vibe}»"
+            if apply_top and cands and not any(mus.visible(i, sid) for i in data.items):
+                top = cands[0]
+                data, _ = mus.add_item(
+                    data, track=top.id, start_ms=a, end_ms=b, offset_ms=top.offset_ms,
+                    style=sid, origin="ai", why=top.why,
+                )  # fmt: skip
+                msg = f"Musica messa nel premontaggio: {msg}"
+            before = hist.snapshot()
+            mus.save(project_dir, data)
+            hist.record(before, hist.snapshot())
+            music_job.update(status="done", message=msg, progress=None)
+        except Exception as exc:  # qualsiasi errore va nel pannello
+            music_job.update(status="error", message=str(exc)[:300], progress=None)
+            music_job[f"failed:{sid}"] = True
+
+    def start_music(a: int | None, b: int | None, note: str, apply_top: bool) -> None:
+        sid = state().get("style")
+        if music_job.get("status") == "running":
+            raise HTTPException(409, "sto già scegliendo la musica: aspetta che finisca")
+        music_job.update(status="running", style=sid, progress="comincio")
+        if music_threaded:
+            threading.Thread(
+                target=lambda: run_music(a, b, note, apply_top, sid), daemon=True
+            ).start()
+        else:
+            run_music(a, b, note, apply_top, sid)
+
+    def maybe_auto_music() -> None:
+        """Nel premontaggio: appena c'è uno stile, Claude mette una musica (una volta per stile)."""
+        sid = state().get("style")
+        if not auto_music or not sid or music_job.get("status") == "running":
+            return
+        if music_job.get(f"failed:{sid}") or not music_sound().get("music", True):
+            return
+        data = mus.load(project_dir)
+        if sid in data.auto_done or any(mus.visible(i, sid) for i in data.items):
+            return
+        start_music(None, None, "", True)  # se fallisce riprova al prossimo avvio
+
+    @app.post("/api/music/suggest")
+    def music_suggest(body: MusicSuggestBody) -> JSONResponse:
+        if body.start_ms is not None and body.end_ms is not None and body.end_ms <= body.start_ms:
+            raise HTTPException(400, "il tratto è vuoto: la fine deve venire dopo l'inizio")
+        start_music(body.start_ms, body.end_ms, body.note.strip(), False)
+        return JSONResponse(payload())
+
+    @app.post("/api/music/item")
+    def music_item(body: MusicItemBody) -> JSONResponse:
+        data = mus.load(project_dir)
+        try:
+            if body.action == "use":
+                if not body.track:
+                    raise mus.MusicError("manca il brano")
+                mus.download(body.track, mroot, mrun, music_lufs)
+                f = {k: v for k, v in body.fields.items() if k in mus.EDITABLE}
+                data, _ = mus.add_item(data, track=body.track, style=state().get("style"),
+                                       origin="user", **f)  # fmt: skip
+            elif body.action == "update" and body.id:
+                if body.fields.get("track"):
+                    mus.download(str(body.fields["track"]), mroot, mrun, music_lufs)
+                data = mus.update_item(data, body.id, body.fields)
+            elif body.action == "remove" and body.id:
+                data = mus.remove_item(data, body.id)
+            else:
+                raise mus.MusicError(f"azione {body.action!r} sconosciuta")
+        except (mus.MusicError, ValueError) as exc:
+            raise fail(exc) from exc
+        mus.save(project_dir, data)
+        return JSONResponse(payload())
+
+    @app.get("/api/music/search")
+    def music_search(q: str = "") -> JSONResponse:
+        try:
+            cat = mus.refresh_catalog(mroot, mrun)
+        except mus.MusicError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        words = [w for w in q.lower().split() if len(w) > 1]
+        res = mus.search(cat, words, limit=30, min_s=30) if words else cat["tracks"][:30]
+        return JSONResponse({"results": [
+            {**t, "downloaded": mus.track_path(t["id"], mroot).exists()} for t in res
+        ], "count": len(cat["tracks"])})  # fmt: skip
+
+    @app.post("/api/music/download")
+    def music_download(body: MusicDownloadBody) -> JSONResponse:
+        try:
+            mus.download(body.id, mroot, mrun, music_lufs)
+        except mus.MusicError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return JSONResponse({"track": track_info(body.id), **payload()})
+
+    @app.get("/media/music/{name}")
+    def music_file(name: str) -> FileResponse:
+        stem = name.removesuffix(".m4a")
+        if not re.fullmatch(r"[\w-]{11}", stem):
+            raise HTTPException(404)
+        path = mus.track_path(stem, mroot)
+        if not path.is_file():
+            raise HTTPException(404)
+        return FileResponse(
+            path, media_type="audio/mp4", headers={"Cache-Control": "max-age=86400"}
+        )
+
+    # --- B-roll e voice-over: foto/video sopra il parlato e una voce fuori campo caricata ---
+
+    def broll_payload() -> dict[str, Any]:
+        try:
+            data = brl.load(project_dir)
+        except brl.BrollError:
+            return {"clips": [], "voices": [], "error": "broll.json non valido"}
+        return {
+            "clips": [
+                {**c.model_dump(), "url": f"/media/broll/broll/{c.file}"} for c in data.clips
+            ],
+            "voices": [
+                {**v.model_dump(), "url": f"/media/broll/voice/{v.file}"} for v in data.voices
+            ],
+            "limits": {"video_mb": brl.MAX_VIDEO_BYTES // 1_000_000,
+                       "image_mb": brl.MAX_IMAGE_BYTES // 1_000_000,
+                       "audio_mb": brl.MAX_AUDIO_BYTES // 1_000_000},
+        }  # fmt: skip
+
+    @app.post("/api/broll/upload")
+    async def broll_upload(
+        request: Request, name: str, at_ms: int = 0, kind: str = "broll"
+    ) -> JSONResponse:
+        """Il file arriva come corpo grezzo della richiesta (niente moduli):
+        ?name=clip.mp4&at_ms=1200. kind=voice per il voice-over, altrimenti B-roll."""
+        try:
+            ftype = brl.kind_of(name)
+        except brl.BrollError as exc:
+            raise fail(exc) from exc
+        if kind == "voice" and ftype == "image":
+            raise HTTPException(400, "il voice-over è un audio: una foto va nel B-roll")
+        limit = brl.size_limit("audio" if kind == "voice" else ftype)
+        incoming = brl.staging(project_dir, name)
+        size = 0
+        try:
+            with incoming.open("wb") as fh:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > limit:
+                        raise HTTPException(
+                            413, f"file troppo grande (massimo {limit // 1_000_000} MB)"
+                        )
+                    fh.write(chunk)
+            if size == 0:
+                raise HTTPException(400, "file vuoto")
+            try:
+                if kind == "voice":
+                    brl.add_voice(project_dir, incoming, name, at_ms)
+                else:
+                    brl.add_clip(project_dir, incoming, name, at_ms)
+            except brl.BrollError as exc:
+                raise fail(exc) from exc
+        finally:
+            incoming.unlink(missing_ok=True)
+        return JSONResponse(payload())
+
+    @app.post("/api/broll/{item_id}/delete")
+    def broll_delete(item_id: str) -> JSONResponse:
+        try:
+            brl.remove(project_dir, item_id)
+        except brl.BrollError as exc:
+            raise fail(exc) from exc
+        return JSONResponse(payload())
+
+    @app.post("/api/broll/{item_id}")
+    def broll_edit(item_id: str, body: BrollEditBody) -> JSONResponse:
+        try:
+            brl.edit(project_dir, item_id, body.fields)
+        except (brl.BrollError, ValueError) as exc:
+            raise fail(exc) from exc
+        return JSONResponse(payload())
+
+    @app.get("/media/broll/{folder}/{name}")
+    def broll_file(folder: str, name: str) -> FileResponse:
+        path = brl.media_path(project_dir, folder, name) if folder in ("broll", "voice") else None
+        if path is None:
+            raise HTTPException(404)
+        return FileResponse(path)
+
+    # --- Chiedi a Claude: chat collegata a Claude Code (modalità Edita e Sviluppa) -----
+
+    def assistant_context(sel: dict[str, Any]) -> dict[str, Any]:
+        tl = timeline()
+        sid = state().get("style")
+        s0, s1, f = sel.get("start_ms"), sel.get("end_ms"), sel.get("frame_ms")
+        if s0 is None and f is not None:
+            s0, s1 = f - 1500, f + 1500
+        lo, hi = (s0 - 500, s1 + 500) if s0 is not None and s1 is not None else (None, None)
+
+        def inside(ms: int) -> bool:
+            return lo is None or lo <= ms <= hi
+
+        lk = style_look()
+        sets = sid or "viral"
+        return {
+            "selection": sel,
+            "style": sid,
+            "words": [{"id": w.id, "text": w.text, "start_ms": w.start_ms, "end_ms": w.end_ms}
+                      for w in tl.words if w.kind == "word" and inside(w.start_ms)][:400],
+            "captions": [c for c in (sel.get("captions") or []) if isinstance(c, dict)][:80],
+            "popups": [{k: v for k, v in p.items() if k not in ("emoji_imgs", "image_url")}
+                       for p in popups_payload() if inside(p["at_ms"])],
+            "transition_points": [b for b in effect_points(tl, eff_of(tl, overrides(tl)))
+                                  if inside(b["at_ms"])],
+            "catalog": {
+                "anims": [a for a in fx.ANIMS if sets in a["sets"]],
+                "transitions": [t for t in fx.TRANSITIONS if sets in t["sets"]],
+                "fonts": sorted(txt.allowed_fonts(lk)) if lk else [],
+                "text_presets": list(txt.PRESETS),
+                "filter_presets": [p["id"] for p in flt.PRESETS],
+                "sounds": {k: [x.get("id") for x in v][:40] for k, v in catalog.items()},
+                "stickers": pops.STICKERS.get(sets, pops.STICKERS["viral"]),
+            },
+        }  # fmt: skip
+
+    def assistant_apply(changed: dict[str, bytes]) -> None:
+        before = hist.snapshot()
+        for name, body in changed.items():
+            tmp = (project_dir / name).with_suffix(".partial")
+            tmp.write_bytes(body)
+            tmp.replace(project_dir / name)
+        hist.record(before, hist.snapshot())
+
+    def assistant_frame(ms: int, dest: Path) -> None:
+        (cover_grab or cov.grab_frame)(media.proxy, max(0, ms - media.offset_ms), dest)
+
+    assistant = Assistant(
+        project_dir, repo_root, context=assistant_context, apply_edit=assistant_apply,
+        frame=assistant_frame, runner=claude_runner or run_claude, git=assistant_git,
+    )  # fmt: skip
+
+    def assistant_out() -> dict[str, Any]:
+        return {**assistant.payload(), "can_restart": restart is not None}
+
+    @app.get("/api/assistant")
+    def assistant_get() -> JSONResponse:
+        return JSONResponse(assistant_out())
+
+    @app.post("/api/assistant")
+    def assistant_post(body: AssistantBody) -> JSONResponse:
+        try:
+            job = assistant.start(body.mode, body.prompt, body.selection, body.images)
+        except AssistantError as exc:
+            raise HTTPException(409 if "lavorando" in str(exc) else 400, str(exc)) from exc
+        if assistant_threaded:
+            threading.Thread(target=assistant.run, args=(job["id"],), daemon=True).start()
+        else:
+            assistant.run(job["id"])
+        return JSONResponse(assistant_out())
+
+    @app.get("/api/assistant/image/{name}")
+    def assistant_image(name: str) -> FileResponse:
+        path = assistant.image_path(name)
+        if path is None:
+            raise HTTPException(404, "immagine non trovata")
+        return FileResponse(path)
+
+    @app.post("/api/assistant/{job_id}/revert")
+    def assistant_revert(job_id: str) -> JSONResponse:
+        try:
+            assistant.revert(job_id)
+        except AssistantError as exc:
+            raise fail(exc) from exc
+        return JSONResponse(assistant_out())
+
+    @app.post("/api/assistant/clear")
+    def assistant_clear() -> JSONResponse:
+        try:
+            assistant.clear()
+        except AssistantError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return JSONResponse(assistant_out())
+
+    @app.post("/api/assistant/restart")
+    def assistant_restart() -> JSONResponse:
+        if restart is None:
+            raise HTTPException(
+                409, "riavvio automatico non disponibile: chiudi e rilancia l'editor"
+            )
+        restart()
+        return JSONResponse({"restarting": True})
+
     @app.post("/api/export/video")
     def export_video() -> JSONResponse:
         if state().get("style") is None:
@@ -917,6 +1484,10 @@ def create_app(
             "covers": covers_payload(),
             "export": export_payload(),
             "vfx": vfx_payload(),
+            "broll": broll_payload(),
+            "music": music_payload(),
+            "import": import_payload(),
+            "versions": hist.versions(),
             "filters": {
                 **flt.for_style(flt.load(project_dir), state().get("style")).model_dump(),
                 "presets": flt.PRESETS,
@@ -932,6 +1503,7 @@ def create_app(
     @app.get("/api/project")
     def get_project() -> JSONResponse:
         maybe_auto_suggest()
+        maybe_auto_music()
         try:
             return JSONResponse(payload())
         except BrandError as exc:
@@ -952,6 +1524,7 @@ def create_app(
             raise HTTPException(404, f"stile {body.id!r} non trovato in styles/")
         update_state(style=body.id)
         maybe_auto_suggest()
+        maybe_auto_music()
         return JSONResponse(payload())
 
     @app.post("/api/effects")

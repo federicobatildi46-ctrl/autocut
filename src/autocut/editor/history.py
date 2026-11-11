@@ -19,6 +19,8 @@ from ..overrides import store
 
 FILES = (
     "popups.json",
+    "broll.json",
+    "music.json",
     "text_style.json",
     "effects.json",
     "cuts.json",
@@ -27,6 +29,8 @@ FILES = (
 )  # vfx.json no: lo aggiorna anche il lavoro in background (Annulla romperebbe una generazione)
 STATE_KEYS = ("style", "brand", "hook")  # da editor_state.json (le "riviste" no)
 LIMIT = 200
+PERSIST = 60  # quanti passi restano salvati su disco (work/history.json)
+HISTORY_FILE = "history.json"
 
 
 class HistoryError(ValueError):
@@ -41,6 +45,100 @@ class History:
         self.undo_stack: list[dict[str, Any]] = []
         self.redo_stack: list[dict[str, Any]] = []
         self.lock = threading.RLock()
+        self._load()
+
+    # --- le pile sopravvivono a ricarica e riavvio dell'editor -----------------------
+
+    @property
+    def store_path(self) -> Path:
+        return self.dir / "work" / HISTORY_FILE
+
+    @staticmethod
+    def _pack(snap: dict[str, Any]) -> dict[str, Any]:
+        files = {
+            k: (v.decode("utf-8") if v is not None else None) for k, v in snap["files"].items()
+        }
+        return {**snap, "files": files}
+
+    @staticmethod
+    def _unpack(snap: dict[str, Any]) -> dict[str, Any]:
+        files = {
+            k: (v.encode("utf-8") if v is not None else None) for k, v in snap["files"].items()
+        }
+        return {**snap, "files": files}
+
+    def _persist(self) -> None:
+        try:
+            self.store_path.parent.mkdir(parents=True, exist_ok=True)
+            body = {
+                "undo": [self._pack(s) for s in self.undo_stack[-PERSIST:]],
+                "redo": [self._pack(s) for s in self.redo_stack[-PERSIST:]],
+            }
+            tmp = self.store_path.with_suffix(".partial")
+            tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self.store_path)
+        except (OSError, UnicodeDecodeError):  # un aiuto: non deve fermare l'editor
+            pass
+
+    def _load(self) -> None:
+        try:
+            body = json.loads(self.store_path.read_text(encoding="utf-8"))
+            self.undo_stack = [self._unpack(s) for s in body.get("undo", [])]
+            self.redo_stack = [self._unpack(s) for s in body.get("redo", [])]
+        except (OSError, ValueError, KeyError, AttributeError):
+            self.undo_stack, self.redo_stack = [], []
+
+    # --- versioni salvate (punti di ripristino con nome) ----------------------------
+
+    @property
+    def versions_dir(self) -> Path:
+        return self.dir / "versions"
+
+    def versions(self) -> list[dict[str, Any]]:
+        out = []
+        for p in sorted(self.versions_dir.glob("v_*.json")) if self.versions_dir.is_dir() else []:
+            try:
+                meta = json.loads(p.read_text(encoding="utf-8"))
+                out.append({"id": p.stem, "name": meta["name"], "created_at": meta["created_at"]})
+            except (OSError, ValueError, KeyError):
+                continue
+        return out[::-1]
+
+    def save_version(self, name: str) -> dict[str, Any]:
+        """Punto di ripristino: tutto quello che l'editor sa del progetto in questo momento."""
+        from datetime import datetime
+
+        now = datetime.now().astimezone()
+        vid = f"v_{now.strftime('%Y%m%d_%H%M%S')}"
+        n = 2
+        while (self.versions_dir / f"{vid}.json").exists():
+            vid = f"v_{now.strftime('%Y%m%d_%H%M%S')}_{n}"
+            n += 1
+        self.versions_dir.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "name": (name.strip() or "Versione")[:60],
+            "created_at": now.isoformat(timespec="seconds"),
+        }
+        body = {**meta, "snapshot": self._pack(self.snapshot())}
+        tmp = self.versions_dir / f"{vid}.partial"
+        tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self.versions_dir / f"{vid}.json")
+        return {"id": vid, **meta}
+
+    def _version_path(self, vid: str) -> Path:
+        p = self.versions_dir / f"{vid}.json"
+        if not vid.startswith("v_") or "/" in vid or "\\" in vid or not p.is_file():
+            raise HistoryError("versione non trovata")
+        return p
+
+    def restore_version(self, vid: str) -> None:
+        body = json.loads(self._version_path(vid).read_text(encoding="utf-8"))
+        snap = self._unpack(body["snapshot"])
+        with self.lock:
+            self._restore(snap)
+
+    def delete_version(self, vid: str) -> None:
+        self._version_path(vid).unlink()
 
     # --- foto dello stato -----------------------------------------------------------
 
@@ -69,6 +167,7 @@ class History:
             self.undo_stack.append(before)
             del self.undo_stack[:-LIMIT]
             self.redo_stack.clear()
+            self._persist()
 
     # --- ripristino -----------------------------------------------------------------
 
@@ -115,6 +214,7 @@ class History:
             prev = self.undo_stack.pop()
             self._restore(prev)
             self.redo_stack.append(cur)
+            self._persist()
 
     def redo(self) -> None:
         with self.lock:
@@ -124,6 +224,7 @@ class History:
             nxt = self.redo_stack.pop()
             self._restore(nxt)
             self.undo_stack.append(cur)
+            self._persist()
 
     @property
     def can_undo(self) -> bool:

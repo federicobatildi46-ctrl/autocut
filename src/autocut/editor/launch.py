@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import webbrowser
@@ -19,6 +20,24 @@ from .server import create_app
 
 class EditorError(ValueError):
     pass
+
+
+# Il comando `autocut editor` fa da supervisore: lancia l'editor in un processo figlio e lo
+# rilancia quando questo esce con RESTART_CODE (dopo una modifica al codice fatta da Claude
+# dalla chat «Chiedi a Claude»). CHILD_ENV dice al figlio che c'è un supervisore.
+RESTART_CODE = 75
+CHILD_ENV = "AUTOCUT_EDITOR_CHILD"
+
+
+def restart_hook():
+    """Funzione di riavvio per l'editor (None se non c'è un supervisore che lo rilancia)."""
+    if os.environ.get(CHILD_ENV) != "1":
+        return None
+
+    def restart() -> None:  # dopo la risposta HTTP: il supervisore rilancia l'editor
+        threading.Timer(0.8, lambda: os._exit(RESTART_CODE)).start()
+
+    return restart
 
 
 def build(
@@ -42,7 +61,10 @@ def build(
     if fingerprint(src) != cam.fingerprint:
         raise EditorError(f"{cam.file_name} è cambiato dall'ingest: rilancia ingest")
     media = prepare(pdir, tl, src, log=log)
-    return create_app(pdir, media, auto_popups=True, keepalive=True), pdir
+    app = create_app(
+        pdir, media, auto_popups=True, auto_music=True, keepalive=True, restart=restart_hook()
+    )
+    return app, pdir
 
 
 def port_busy(port: int) -> bool:

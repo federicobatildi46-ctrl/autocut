@@ -177,6 +177,74 @@ l'utente: Claude non le inserisce mai da solo.
 Le foto del web hanno quasi sempre un copyright: per i video da pubblicare preferisci
 *Licenza libera* o foto tue.
 
+### Importa un raw, Salva e Annulla
+
+- **File multimediali → Importa un video**: scegli un file dal PC (o uno scaricato da iCloud) o
+  premi «Cerca nei Download e iCloud». Il video si copia in `raw/<progetto>/` (l'originale non si
+  tocca) e parte il premontaggio: ingest, trascrizione (ElevenLabs Scribe, a pagamento), tagli
+  delle pause. A fine lavoro «Apri il progetto» riavvia l'editor sul progetto nuovo.
+- **Salva** (in alto, o Ctrl+S): ogni modifica è già salvata; qui fissi una *versione con nome*
+  (`versions/`) a cui torni quando vuoi, anche dopo aver chiuso l'editor. Ripristinare si può
+  annullare. **Annulla/Ripeti** ora sopravvivono ai riavvii (`work/history.json`, ultimi 60 passi).
+- Le icone a sinistra della timeline sono cliccabili: testo (modifica la frase sotto la testina),
+  clip (seleziona la clip sotto la testina; 🔊 muta la voce), audio, Genera AI, B-roll.
+
+### B-roll e voice-over
+
+Scheda **B-roll** (a sinistra, e nello schermo intero): carichi video o foto (anche più file, o
+trascinandoli sul pannello) e vanno **sopra la ripresa** dalla testina; la voce di chi parla
+continua. Durata e punto di partenza del video si regolano nel pannello; i blocchi azzurri nella
+timeline si trascinano per spostarli. Nella scheda **Audio** la carta **🎤 Voice-over** carica una
+registrazione fatta col telefono (m4a, mp3, wav…): parte dalla testina, ha il suo volume e può
+**zittire la voce della ripresa** mentre parla (blocchi arancioni). Tutto in `broll.json`
+(file in `work/broll/` e `work/voiceover/`), con Annulla/Ripeti; nell'export il B-roll è cucito
+con ffmpeg nell'estratto della camera e il voice-over è una traccia di Remotion. I tempi sono
+sull'asse della camera: restano giusti se cambi i tagli.
+
+### Musica di sottofondo (libreria gratuita Audio Library di YouTube)
+
+Pannello **Audio → 🎵 Musica di sottofondo**. I brani vengono solo dal canale YouTube
+[Audio Library](https://www.youtube.com/@audiolibrary_) (oltre 4000, gratuiti anche per video
+monetizzati con i crediti in descrizione):
+1. il catalogo (titoli con mood, genere e uso) si scarica con yt-dlp in `library/music/catalog.json`
+   e si aggiorna una volta a settimana;
+2. Claude legge il parlato del video (o del tratto scelto) e lo stile e decide il mood; dai titoli
+   più vicini sceglie 5 brani; dalle sezioni di ogni brano («1:45 Minimalist calm section»)
+   sceglie da dove farlo partire. I 5 brani vengono scaricati subito (`library/music/files/`),
+   così li ascolti con ▶ e li metti con *Usa*;
+3. **premontaggio**: appena c'è uno stile, la musica consigliata va da sola su tutto il video
+   (una volta per stile; se la togli non torna);
+4. ogni musica ha volume (rispetto al livello dello stile: `music_db`, di base 19 dB sotto la voce
+   normalizzata, misurando la loudness del brano), muto, punto di partenza, tratto (*Tutto il
+   video* oppure *Da qui* / *A qui* con la testina), *Rigenera*, *Togli*; si vede come barra verde
+   nella traccia audio e suona nell'anteprima e nel render (loop se il brano è più corto);
+5. **Cerca nella libreria** per parola (es. «motivational cinematic») e *Usa* qualsiasi brano;
+6. **Crediti da incollare nella descrizione**: il blocco che il canale chiede, pronto da copiare.
+
+Dalla chat *Chiedi a Claude* puoi anche dire «musica solo in questa clip» o «abbassala qui».
+File: `projects/<nome>/music.json` (con Annulla).
+
+### Chiedi a Claude (chat collegata a Claude Code)
+
+Pulsante **Chiedi a Claude** in basso a destra: una chat dentro l'editor, con due modalità.
+
+- **Edita il video**: premi *Seleziona sulla timeline* (la timeline si illumina), trascina su un
+  tratto o clicca un fotogramma, poi scrivi cosa vuoi («la scritta più grande con bagliore e
+  fade», «sotto la frase l'emoji del pianto»). Claude Code lavora su copie dei file del
+  progetto (pop-up, testi, effetti, filtri, tagli, audio) seguendo
+  `src/autocut/editor/assistant_guide.md`; l'editor le convalida e le applica tutte insieme:
+  **un solo Annulla** le toglie. Se manca uno strumento lo dice, con il pulsante *Aggiungilo
+  all'editor*.
+- **Modifica l'editor**: chiedi una funzione nuova («una scheda per…»). Claude Code cambia il
+  codice del repo come in una sessione normale (niente commit, push, `.env`), lancia ruff e i
+  test, e nella chat vedi i passi e il tempo. Alla fine la pagina si ricarica; se è cambiato il
+  Python l'editor **si riavvia da solo** (`autocut editor` fa da supervisore: uscita 75 =
+  riavvio). *Annulla modifiche* rimette il codice com'era (fotografia git + copia dei file non
+  ancora in git, senza mettere niente in stage).
+
+La conversazione continua fra un messaggio e l'altro (`claude -p --resume`) ed è salvata in
+`projects/<nome>/claude_chat.json`. Usa il tuo account Claude Code; nessun credito Higgsfield.
+
 ### Genera AI (Genera con Higgsfield)
 
 Scheda **Genera AI** a sinistra (e pulsante *Genera AI* nello schermo intero): metti la testina

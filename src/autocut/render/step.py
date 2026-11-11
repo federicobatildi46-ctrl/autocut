@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import audio_mix, effects, filters, manual_cuts, text_style
+from .. import audio_mix, effects, filters, manual_cuts, music, text_style
 from ..brands import list_brands
 from ..ingest.fingerprint import fingerprint
 from ..models.io import read_model
@@ -125,6 +125,11 @@ def run_style_preview(
     if vfx.active(pdir):
         log("clip AI (Genera con Higgsfield) dentro il video...")
         source = vfx.bake(pdir, source, start, end)
+    from .. import broll  # B-roll (foto e video di supporto) e voice-over caricati dal creator
+
+    if broll.active_clips(pdir):
+        log("B-roll sopra il parlato...")
+        source = broll.bake(pdir, source, start, end)
     props, pieces = build_props(
         project_dir=pdir,
         tl=tl,
@@ -140,6 +145,12 @@ def run_style_preview(
         sounds_raw=sounds_raw,
     )
     stage_sounds(props["sounds"], work)
+    props["voiceovers"] = broll.render_voices(pdir, work, to_out, pieces)
+    props["music"] = music.render_music(pdir, work, to_out, pieces, sid, look["sound"])
+    for m in props["music"]:
+        log(f"  musica {m['from_ms'] / 1000:5.2f} s per {m['dur_ms'] / 1000:.1f} s  {m['id']}")
+    for vo in props["voiceovers"]:
+        log(f"  voice-over {vo['from_ms'] / 1000:5.2f} s  {vo['id']}")
     if any(c.get("layer") == "person" for c in props["cards"]):
         log("sagoma della persona per le grafiche dietro (MediaPipe, in locale)...")
         masks, count = ensure_masks(source)

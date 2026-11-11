@@ -73,6 +73,11 @@ export type StyledReelProps = {
   transitions?: { join: number; at_ms: number; type: string; ms: number }[];
   lowerThird: { name: string; role: string; from_ms: number; to_ms: number; name_font: string; role_font: string } | null;
   sounds: { src: string; from_ms: number; volume: number }[];
+  // voice-over caricato dal creator: parte sul montato; può zittire la voce della ripresa
+  voiceovers?: { id: string; src: string; from_ms: number; dur_ms: number; volume: number; mute_camera: boolean }[];
+  // musica di sottofondo (libreria Audio Library): tratto sul montato, punto di partenza del brano,
+  // volume già relativo alla voce, dissolvenze; loop se il brano è più corto del tratto
+  music?: { id: string; src: string; from_ms: number; dur_ms: number; offset_ms: number; volume: number; fade_in_ms: number; fade_out_ms: number; loop: boolean }[];
 };
 
 const f = (ms: number, fps: number) => Math.round((ms / 1000) * fps);
@@ -174,7 +179,15 @@ const TransitionVideo: React.FC<{ p: StyledReelProps }> = ({ p }) => {
       {/* l'audio resta a taglio netto (niente voce doppia durante la transizione) */}
       {p.video.pieces.map((x, i) => (
         <Sequence key={`a${i}`} from={f(x.from_ms, fps)} durationInFrames={Math.max(1, f(x.to_ms, fps) - f(x.from_ms, fps))}>
-          <Audio src={staticFile(p.video.src)} trimBefore={f(x.src_ms, fps)} />
+          <Audio
+            src={staticFile(p.video.src)}
+            trimBefore={f(x.src_ms, fps)}
+            volume={(fr) => {
+              // mentre parla un voice-over con «zittisci la ripresa», la voce della camera tace
+              const ms = ((f(x.from_ms, fps) + fr) / fps) * 1000;
+              return (p.voiceovers ?? []).some((v) => v.mute_camera && ms >= v.from_ms && ms < v.from_ms + v.dur_ms) ? 0 : 1;
+            }}
+          />
         </Sequence>
       ))}
     </>
@@ -599,6 +612,26 @@ export const StyledReel: React.FC<StyledReelProps> = (p) => {
           <Audio src={staticFile(s.src)} volume={s.volume} />
         </Sequence>
       ))}
+      {(p.voiceovers ?? []).map((v) => (
+        <Sequence key={v.id} from={f(v.from_ms, fps)}>
+          <Audio src={staticFile(v.src)} volume={v.volume} />
+        </Sequence>
+      ))}
+      {(p.music ?? []).map((m) => {
+        const dur = Math.max(1, f(m.dur_ms, fps));
+        const fin = Math.max(1, f(m.fade_in_ms, fps));
+        const fout = Math.max(1, f(m.fade_out_ms, fps));
+        return (
+          <Sequence key={m.id} from={f(m.from_ms, fps)} durationInFrames={dur}>
+            <Audio
+              src={staticFile(m.src)}
+              trimBefore={f(m.offset_ms, fps)}
+              loop={m.loop}
+              volume={(fr) => m.volume * Math.min(1, (fr + 1) / fin, (dur - fr) / fout)}
+            />
+          </Sequence>
+        );
+      })}
     </AbsoluteFill>
   );
 };

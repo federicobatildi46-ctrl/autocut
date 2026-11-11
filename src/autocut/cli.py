@@ -282,7 +282,35 @@ def editor(
     ] = False,
 ) -> None:
     """Apre l'editor visivo in locale (http://127.0.0.1:<porta>)."""
-    from .editor.launch import build, port_busy, serve
+    import os
+    import subprocess
+    import sys
+
+    from .editor.launch import CHILD_ENV, RESTART_CODE, build, port_busy, serve
+
+    if os.environ.get(CHILD_ENV) != "1":
+        # supervisore: l'editor gira in un processo figlio e si rilancia da solo quando Claude
+        # cambia il codice dalla chat (uscita RESTART_CODE); il browser si apre una volta sola
+        env = {**os.environ, CHILD_ENV: "1"}
+        argv = [sys.executable, "-c", "from autocut.cli import app; app()", *sys.argv[1:]]
+        try:
+            while True:
+                code = subprocess.call(argv, env=env)
+                if code != RESTART_CODE:
+                    raise typer.Exit(code)
+                from .editor.importer import swap_project, take_open_request
+                from .paths import projects_root
+
+                nxt = take_open_request(projects_root())  # «Apri il progetto» dopo un import
+                if nxt:
+                    argv = swap_project(argv, nxt)
+                    typer.echo(f"apro il progetto {nxt}...")
+                else:
+                    typer.echo("riavvio l'editor con il codice nuovo...")
+                if "--no-browser" not in argv:
+                    argv.append("--no-browser")
+        except KeyboardInterrupt:
+            raise typer.Exit(0) from None
 
     if port_busy(port):
         typer.echo(

@@ -217,6 +217,8 @@ function tick() {
   updatePopupFx(cur);
   updateSounds(cur);
   updateVfxOverlay(cur);
+  updateBroll(cur);
+  updateMusic(cur);
   if (S.viewer) updateViewer(cur);
   updateCapSel();
   requestAnimationFrame(tick);
@@ -352,6 +354,7 @@ function wireViewer() {
   $("#v-images").addEventListener("click", () => side("images"));
   $("#v-audio").addEventListener("click", () => side("audio"));
   $("#v-vfx").addEventListener("click", () => side("vfx"));
+  $("#v-broll").addEventListener("click", () => side("broll"));
   video.addEventListener("play", () => $("#v-play").classList.add("playing"));
   video.addEventListener("pause", () => $("#v-play").classList.remove("playing"));
   // Esc in schermo intero lo chiude il browser: chiudiamo anche il livello
@@ -728,6 +731,11 @@ function apply(data) {
   renderTextTrack();
   renderAudioTrack();
   renderVfxTrack();
+  renderBrollTrack();
+  renderVersions();
+  renderHeadMute();
+  if (BR.sel && !brClip(BR.sel)) BR.sel = null;
+  if (BR.selVo && !brVoice(BR.selVo)) BR.selVo = null;
   renderLeft();
   const typing = ["boost-prompt", "pop-prompt"].includes(document.activeElement?.id);
   if (!typing) renderRight();
@@ -741,7 +749,9 @@ function managePolling() {
   const running = (S.data?.ai_requests ?? []).some((r) => r.status === "running")
     || S.data?.popup_job?.status === "running" || S.data?.covers?.job?.status === "running"
     || S.data?.export?.job?.status === "running"
-    || (S.data?.vfx?.shots ?? []).some((s) => s.status === "running");
+    || (S.data?.vfx?.shots ?? []).some((s) => s.status === "running")
+    || S.data?.import?.status === "running"
+    || S.data?.music?.job?.status === "running";
   if (running && !S.pollTimer) {
     S.pollTimer = setInterval(async () => {
       try { apply(await api("/api/project")); } catch { /* riprova al prossimo giro */ }
@@ -773,6 +783,7 @@ function contentWidth() {
 function renderTimeline() {
   const w = contentWidth();
   $("#tl-content").style.width = `${w}px`;
+  if (typeof renderAskSel === "function") renderAskSel(); // selezione di «Chiedi a Claude»
   $("#filmstrip").style.width = `${w - PAD * 2}px`;
   $("#filmstrip").style.left = `${PAD}px`;
   renderRuler();
@@ -782,6 +793,7 @@ function renderTimeline() {
   renderRanges();
   renderAudioTrack();
   renderVfxTrack();
+  renderBrollTrack();
   updatePlayhead(nowMs());
 }
 
@@ -1408,6 +1420,7 @@ const TOOL_TABS = [
   ["text", "Testo", `<svg viewBox="0 0 24 24"><path d="M4 7V5h16v2M12 5v14M9 19h6"/></svg>`],
   ["stickers", "Sticker", `<svg viewBox="0 0 24 24"><path d="M15 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h7l8-8V6a3 3 0 0 0-3-3h-3z"/><path d="M13 21v-5a3 3 0 0 1 3-3h5"/></svg>`],
   ["images", "Immagini", `<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg>`],
+  ["broll", "B-roll", `<svg viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="m16 11 5-3v8l-5-3"/><path d="M6 4h7"/></svg>`],
   ["effects", "Effetti", `<svg viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg>`],
   ["transitions", "Transizioni", `<svg viewBox="0 0 24 24"><path d="M4 4h7v16H4zM13 4l7 8-7 8"/></svg>`],
   ["subs", "Sottotitoli", `<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 13h4M13 13h4M7 16h10"/></svg>`],
@@ -1426,7 +1439,7 @@ function renderLeft() {
   if (S.leftTab === "media") box.innerHTML = renderMedia();
   else if (S.leftTab === "brand") box.innerHTML = renderBrandPanel();
   else if (S.leftTab === "subs") box.innerHTML = renderTranscript();
-  else if (["text", "stickers", "images", "effects", "audio", "transitions", "filters", "vfx"].includes(S.leftTab)) renderTextPanels();
+  else if (["text", "stickers", "images", "broll", "effects", "audio", "transitions", "filters", "vfx"].includes(S.leftTab)) renderTextPanels();
   else {
     const label = TOOL_TABS.find((t) => t[0] === S.leftTab)?.[1] ?? "";
     box.innerHTML = `<div class="placeholder">${TOOL_TABS.find((t) => t[0] === S.leftTab)?.[2] ?? ""}
@@ -1450,8 +1463,9 @@ function renderMedia() {
     ? `<div class="section-title" style="margin-top:14px">Ignorati</div>${S.tl.detection.ignored.map((i) => `<div class="meta" style="color:var(--muted);font-size:12px">${esc(i)}</div>`).join("")}`
     : "";
   return `
-    <div class="btn-row"><button class="btn" disabled title="Si importa con: autocut ingest">＋ Importa</button></div>
-    <div class="section-title">Nel progetto</div>
+    <div class="section-title">Importa un video raw</div>
+    ${importHTML()}
+    <div class="section-title" style="margin-top:14px">Nel progetto</div>
     ${card(c, "camera", `<span class="tag">Camera</span><span class="tag">audio di riferimento</span>`)}
     ${sc ? card(sc, "screen", `<span class="tag">Schermo</span><span class="tag mute">audio muto</span>`) : ""}
     ${ignored}
@@ -1611,6 +1625,14 @@ function wireEvents() {
   wireFiltersPanel($("#left-content"));
   wireAudioPanel($("#left-content"));
   wireAudioPanel($("#viewer-panel"));
+  wireMusicPanel($("#left-content"));
+  wireMusicPanel($("#viewer-panel"));
+  wireBrollPanel($("#left-content"));
+  wireBrollPanel($("#viewer-panel"));
+  wireBrollTracks();
+  wireImport($("#left-content"));
+  wireVersions();
+  wireTimelineHeads();
   video.addEventListener("play", ensureAudio);
   video.addEventListener("pause", stopSounds);
   $("#tl-content").addEventListener("mousedown", (e) => {
@@ -1843,6 +1865,7 @@ function onKey(e) {
   const mod = e.ctrlKey || e.metaKey;
   if (mod && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
   if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); return; }
+  if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveVersion(true); return; } // salva una versione
   if (mod && e.key.toLowerCase() === "b") { e.preventDefault(); splitHere(); return; }
   if (e.key === "Escape" && (S.sndSel || S.piece)) { e.preventDefault(); S.sndSel = null; S.piece = null; renderAudioTrack(); renderRanges(); updateToggle(); renderTextPanels(); return; }
   if (S.sndSel && (e.key === "Delete" || e.key === "Backspace")) {
@@ -2047,7 +2070,7 @@ function textPanelHTML() {
 // Ridisegna i pannelli Testo visibili (a sinistra e nello schermo intero).
 function renderTextPanels() {
   const boxes = [];
-  if (["text", "stickers", "images", "effects", "audio", "transitions", "filters", "vfx"].includes(S.leftTab)) boxes.push([$("#left-content"), S.leftTab]);
+  if (["text", "stickers", "images", "broll", "effects", "audio", "transitions", "filters", "vfx"].includes(S.leftTab)) boxes.push([$("#left-content"), S.leftTab]);
   if (S.viewer && S.txPanel) boxes.push([$("#viewer-panel"), S.viewerTab]);
   for (const [box, tab] of boxes) {
     // non interrompere chi sta scrivendo o trascinando un cursore
@@ -2057,7 +2080,7 @@ function renderTextPanels() {
     const top = box.scrollTop;
     if (tab === "transitions") S.fxTab = "trans"; // la scheda Transizioni = giunte del pannello Effetti
     box.innerHTML = tab === "stickers" ? stickerPanelHTML() : tab === "effects" || tab === "transitions" ? effectsPanelHTML()
-      : tab === "images" ? imagesPanelHTML() : tab === "vfx" ? vfxPanelHTML() : tab === "audio" ? audioPanelHTML() : tab === "filters" ? filtersPanelHTML() : textPanelHTML();
+      : tab === "images" ? imagesPanelHTML() : tab === "broll" ? brollPanelHTML() : tab === "vfx" ? vfxPanelHTML() : tab === "audio" ? audioPanelHTML() : tab === "filters" ? filtersPanelHTML() : textPanelHTML();
     if (tab === "effects" || tab === "transitions") maybeAutoFx();
     box.scrollTop = top;
   }
@@ -2075,6 +2098,7 @@ function toggleViewerPanel(on = !S.txPanel, tab = S.viewerTab) {
   $("#v-images")?.classList.toggle("on", on && tab === "images");
   $("#v-audio")?.classList.toggle("on", on && tab === "audio");
   $("#v-vfx")?.classList.toggle("on", on && tab === "vfx");
+  $("#v-broll")?.classList.toggle("on", on && tab === "broll");
   if (on) renderTextPanels();
   if (S.viewer) fitFrame();
 }
@@ -2926,7 +2950,7 @@ function applyVoiceGain(liveDb) {
   const a = audioData();
   if (!a) return;
   const db = (a.voice_norm_db ?? 0) + (liveDb ?? a.voice_db);
-  const g = a.voice_muted ? 0 : Math.pow(10, db / 20);
+  const g = a.voice_muted || BR.duck ? 0 : Math.pow(10, db / 20); // BR.duck: parla un voice-over
   if (SND.voice) SND.voice.gain.value = g;
   else video.volume = Math.max(0, Math.min(1, g));
 }
@@ -2986,7 +3010,7 @@ function renderAudioTrack() {
     const cls = ["snd", `f-${s.family}`, s.muted ? "muted" : "", s.id === S.sndSel ? "sel" : "", s.origin === "user" ? "user" : "", isCut(s.at_ms) ? "cut" : ""].join(" ");
     return `<div class="${cls}" data-snd="${esc(s.id)}" style="left:${left}px;width:${width}px" title="${esc(s.label)} · ${esc(s.reason)} · ${dbTxt(s.gain_db)}${s.muted ? " · muto" : ""}">
       <i>${FAMILY_ICON[s.family] ?? "♪"}</i><span>${width > 46 ? esc(s.label) : ""}</span></div>`;
-  }).join("") + (a.voice_muted ? `<div class="snd-note">voce muta</div>` : "");
+  }).join("") + musicTrackHTML() + (a.voice_muted ? `<div class="snd-note">voce muta</div>` : "");
 }
 
 function selectSound(id, { open = true } = {}) {
@@ -3067,6 +3091,8 @@ function audioPanelHTML() {
       ${slider("sfx_db", a.sfx_db, -30, 12)}
       ${a.style ? "" : `<div class="tx-hint">Scegli uno stile (Viral o Premium) per avere i suoni automatici.</div>`}
     </div>
+    ${voiceCardHTML()}
+    ${musicCardHTML()}
     <div class="st-sub">Suoni nel video (${a.sounds.length})</div>
     <div class="st-list">${list || `<div class="tx-hint">Nessun suono: aggiungine uno qui sotto.</div>`}</div>
     <div class="section-title" style="margin-top:14px">Aggiungi un suono alla testina (${showTime(nowMs())})</div>
@@ -3412,6 +3438,303 @@ function updateVfxOverlay(cur) {
   else if (!video.paused && el.paused) el.play().catch(() => {});
   if (el.style.transform !== video.style.transform) el.style.transform = video.style.transform;
   if (el.style.filter !== video.style.filter) el.style.filter = video.style.filter;
+}
+
+// --- B-roll e voice-over -----------------------------------------------------------------------
+// B-roll: foto o video caricati che coprono la ripresa per un tratto (la voce continua).
+// Voice-over: un audio registrato a parte (telefono) che parte in un punto e commenta le immagini.
+// I tempi sono sull'asse della camera, come tutto il resto: restano giusti se cambi i tagli.
+
+const BR = { sel: null, selVo: null, busy: "", duck: false, audios: new Map(), drag: null };
+const brData = () => S.data?.broll ?? { clips: [], voices: [], limits: {} };
+const brClip = (id) => brData().clips.find((c) => c.id === id) ?? null;
+const brVoice = (id) => brData().voices.find((v) => v.id === id) ?? null;
+const brSec = (ms) => `${(ms / 1000).toFixed(1).replace(".", ",")} s`;
+const brSave = (id, fields, msg) => mutate(`/api/broll/${id}`, { fields }, msg);
+const BR_ICON = { video: "🎞", image: "🖼" };
+
+function brThumb(c) {
+  return c.kind === "image"
+    ? `<img src="${esc(c.url)}" alt="" loading="lazy" draggable="false">`
+    : `<video src="${esc(c.url)}#t=0.4" preload="metadata" muted playsinline></video>`;
+}
+
+function brollPanelHTML() {
+  const d = brData();
+  const sel = brClip(BR.sel);
+  let selBox = "";
+  if (sel) {
+    const room = sel.kind === "video" && sel.media_ms ? Math.max(500, sel.media_ms - sel.src_ms) : 60000;
+    selBox = `<div class="st-sel">
+      <div class="st-sel-head"><span class="st-thumb br-thumb">${brThumb(sel)}</span>
+        <div><b>${esc(sel.name || "B-roll")}</b><div class="meta">a ${showTime(sel.at_ms)} · ${brSec(sel.duration_ms)}${sel.enabled ? "" : " · spento"}</div></div>
+        <button class="icon-btn" data-br="close" title="Deseleziona">✕</button></div>
+      <div class="btn-row tx-actions">
+        <button class="btn" data-br="seek" data-id="${esc(sel.id)}">▶ Vedi nel video</button>
+        <button class="btn" data-br="here" data-id="${esc(sel.id)}" title="Parte dove c'è la testina">Sposta qui</button>
+        <button class="btn" data-br="nudge" data-id="${esc(sel.id)}" data-ms="-100" title="0,1 s prima">◀</button>
+        <button class="btn" data-br="nudge" data-id="${esc(sel.id)}" data-ms="100" title="0,1 s dopo">▶</button>
+      </div>
+      <div class="section-title">Durata <span class="tx-val" id="br-duration_ms-val">${brSec(sel.duration_ms)}</span></div>
+      <input type="range" class="tx-range" data-br-range="duration_ms" data-id="${esc(sel.id)}" min="500" max="${Math.min(30000, room)}" step="100" value="${Math.min(sel.duration_ms, 30000)}">
+      ${sel.kind === "video" && sel.media_ms > 1000 ? `
+        <div class="section-title">Parte da <span class="tx-val" id="br-src_ms-val">${brSec(sel.src_ms)}</span></div>
+        <input type="range" class="tx-range" data-br-range="src_ms" data-id="${esc(sel.id)}" min="0" max="${Math.max(0, sel.media_ms - 500)}" step="100" value="${sel.src_ms}">
+        <div class="tx-hint">Il video caricato dura ${brSec(sel.media_ms)}: scegli da che secondo prenderlo.</div>` : ""}
+      <div class="btn-row tx-actions">
+        <button class="btn${sel.enabled ? "" : " on"}" data-br="toggle" data-id="${esc(sel.id)}">${sel.enabled ? "Spegni" : "Riaccendi"}</button>
+        <button class="btn danger" data-br="del" data-id="${esc(sel.id)}">Elimina</button>
+      </div></div>`;
+  }
+  const list = d.clips.slice().sort((a, b) => a.at_ms - b.at_ms).map((c) => `
+    <button class="st-item${c.id === BR.sel ? " on" : ""}${c.enabled ? "" : " dim"}" data-br="pick" data-id="${esc(c.id)}">
+      <span class="st-thumb br-thumb">${brThumb(c)}</span>
+      <span class="st-item-t">${BR_ICON[c.kind]} ${showTime(c.at_ms)} · ${brSec(c.duration_ms)}
+        <span class="meta">${esc(c.name || c.file)}${c.enabled ? "" : " · spento"}</span></span></button>`).join("");
+  const lim = d.limits ?? {};
+  return `<div class="br-panel">
+    <p class="tx-hint">Il <b>B-roll</b> sono le immagini che mostrano quello che dici: un dettaglio, un oggetto, un paesaggio. Carica un video o una foto e va <b>sopra la ripresa</b> dalla testina (${clock(nowMs())}); la tua voce continua.</p>
+    <div class="btn-row"><button class="btn vfx-go" data-br="add"${BR.busy ? " disabled" : ""}>${BR.busy ? esc(BR.busy) : "＋ Carica video o foto"}</button></div>
+    <div class="tx-hint">Anche trascinando i file qui. Video fino a ${lim.video_mb ?? 1500} MB, foto fino a ${lim.image_mb ?? 40} MB. Poi trascina il blocco azzurro nella timeline per spostarlo.</div>
+    ${selBox}
+    <div class="st-sub">B-roll nel video (${d.clips.length})</div>
+    <div class="st-list">${list || `<div class="tx-hint">Nessun B-roll ancora.</div>`}</div>
+    <div class="tx-hint" style="margin-top:10px">Vuoi commentare le immagini con la tua voce? Nella scheda <b>Audio</b> c'è «🎤 Voice-over»: carichi la registrazione fatta col telefono.</div>
+  </div>`;
+}
+
+function voiceCardHTML() {
+  const d = brData();
+  const sel = brVoice(BR.selVo);
+  const rows = d.voices.map((v) => `
+    <div class="br-vo${v.id === BR.selVo ? " on" : ""}${v.enabled ? "" : " dim"}">
+      <button class="icon-btn" data-br="vo-play" data-id="${esc(v.id)}" title="Ascolta dal punto in cui parte">▶</button>
+      <button class="br-vo-t" data-br="vo-pick" data-id="${esc(v.id)}"><b>${esc(v.name || v.file)}</b>
+        <span class="meta">${showTime(v.at_ms)} · ${brSec(v.duration_ms)} · ${dbTxt(v.gain_db)}${v.enabled ? "" : " · spento"}</span></button>
+    </div>`).join("");
+  let selBox = "";
+  if (sel) {
+    selBox = `<div class="br-vo-edit">
+      <div class="btn-row tx-actions">
+        <button class="btn" data-br="vo-here" data-id="${esc(sel.id)}" title="Parte dove c'è la testina">Sposta qui</button>
+        <button class="btn" data-br="vo-nudge" data-id="${esc(sel.id)}" data-ms="-100">◀</button>
+        <button class="btn" data-br="vo-nudge" data-id="${esc(sel.id)}" data-ms="100">▶</button>
+        <button class="btn${sel.enabled ? "" : " on"}" data-br="vo-toggle" data-id="${esc(sel.id)}">${sel.enabled ? "Spegni" : "Riaccendi"}</button>
+        <button class="btn danger" data-br="vo-del" data-id="${esc(sel.id)}">Elimina</button>
+      </div>
+      <div class="section-title">Volume <span class="tx-val" id="br-gain_db-val">${dbTxt(sel.gain_db)}</span></div>
+      <input type="range" class="tx-range" data-br-range="gain_db" data-id="${esc(sel.id)}" min="-240" max="120" step="5" value="${Math.round(sel.gain_db * 10)}">
+      <label class="vfx-chk"><input type="checkbox" data-br-mutecam data-id="${esc(sel.id)}"${sel.mute_camera ? " checked" : ""}><span><b>Zittisci la voce della ripresa</b> mentre parla il voice-over<br><span class="tx-hint">Lascia acceso se commenti le immagini: senti solo la tua registrazione.</span></span></label>
+    </div>`;
+  }
+  return `<div class="au-card">
+    <div class="au-head"><b>🎤 Voice-over</b>
+      <button class="btn small vfx-go" data-br="voice"${BR.busy ? " disabled" : ""}>${BR.busy ? esc(BR.busy) : "＋ Carica audio"}</button></div>
+    <div class="tx-hint">Registra col telefono (app Memo vocali) e carica qui il file: parte dalla testina (${clock(nowMs())}) e suona sopra il video. Anche un video: se ne usa la voce.</div>
+    ${rows ? `<div class="br-vo-list">${rows}</div>` : ""}${selBox}
+  </div>`;
+}
+
+function renderBrollTrack() {
+  const d = brData();
+  const el = $("#track-broll"), vo = $("#track-vo");
+  if (el) {
+    el.innerHTML = d.clips.map((c) => `<div class="br-blk${c.enabled ? "" : " off"}${c.id === BR.sel ? " sel" : ""}" data-brblk="${esc(c.id)}"
+      style="left:${xOf(c.at_ms)}px;width:${Math.max(14, (c.duration_ms / 1000) * S.pps)}px" title="${esc(`${c.name || "B-roll"} · ${brSec(c.duration_ms)}`)}">${BR_ICON[c.kind]}<span>${(c.duration_ms / 1000) * S.pps > 60 ? esc(c.name || "B-roll") : ""}</span></div>`).join("");
+  }
+  if (vo) {
+    vo.innerHTML = d.voices.map((v) => `<div class="vo-blk${v.enabled ? "" : " off"}${v.id === BR.selVo ? " sel" : ""}" data-voblk="${esc(v.id)}"
+      style="left:${xOf(v.at_ms)}px;width:${Math.max(14, (v.duration_ms / 1000) * S.pps)}px" title="${esc(`${v.name || "Voice-over"} · ${brSec(v.duration_ms)}`)}">🎤<span>${(v.duration_ms / 1000) * S.pps > 60 ? esc(v.name || "Voice-over") : ""}</span></div>`).join("");
+  }
+}
+
+function openBroll(id) {
+  BR.sel = id;
+  renderBrollTrack();
+  if (S.viewer) toggleViewerPanel(true, "broll");
+  else if (S.leftTab !== "broll") { S.leftTab = "broll"; renderLeft(); }
+  else renderTextPanels();
+}
+
+function openVoice(id) {
+  BR.selVo = id;
+  renderBrollTrack();
+  if (S.viewer) toggleViewerPanel(true, "audio");
+  else if (S.leftTab !== "audio") { S.leftTab = "audio"; renderLeft(); }
+  else renderTextPanels();
+}
+
+async function brUpload(files, kind) {
+  const list = [...files];
+  if (!list.length || BR.busy) return;
+  for (const [i, f] of list.entries()) {
+    BR.busy = `Carico ${f.name.slice(0, 24)}… (${i + 1}/${list.length})`;
+    renderTextPanels();
+    try {
+      const at = Math.round(nowMs());
+      const res = await fetch(`/api/broll/upload?name=${encodeURIComponent(f.name)}&at_ms=${at}&kind=${kind}`, {
+        method: "POST", headers: { "content-type": "application/octet-stream" }, body: f,
+      });
+      if (!res.ok) {
+        let msg = res.statusText;
+        try { msg = (await res.json()).detail || msg; } catch { /* vuoto */ }
+        throw new Error(msg);
+      }
+      apply(await res.json());
+      const added = kind === "voice" ? brData().voices.at(-1) : brData().clips.at(-1);
+      if (added) { if (kind === "voice") BR.selVo = added.id; else BR.sel = added.id; }
+      toast(kind === "voice" ? "Voice-over aggiunto" : "B-roll aggiunto: trascinalo o regola la durata");
+    } catch (e) {
+      toast(`${f.name}: ${e.message}`, true);
+    }
+  }
+  BR.busy = "";
+  renderBrollTrack();
+  renderTextPanels();
+}
+
+function brPick(kind) {
+  const input = Object.assign(document.createElement("input"), {
+    type: "file", multiple: kind !== "voice",
+    accept: kind === "voice" ? "audio/*,video/*,.m4a,.mp3,.wav,.aac,.caf" : "video/*,image/*",
+  });
+  input.addEventListener("change", () => brUpload(input.files, kind));
+  input.click();
+}
+
+function wireBrollPanel(box) {
+  const tabOf = () => (box.id === "viewer-panel" ? S.viewerTab : S.leftTab);
+  box.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-br]");
+    if (!b || b.disabled) return;
+    const d = b.dataset, id = d.id;
+    switch (d.br) {
+      case "add": brPick("broll"); break;
+      case "voice": brPick("voice"); break;
+      case "close": BR.sel = null; renderBrollTrack(); renderTextPanels(); break;
+      case "pick": { const c = brClip(id); if (c) { video.pause(); seekMs(Math.max(S.axisStart, c.at_ms - 300)); } openBroll(id); break; }
+      case "seek": { const c = brClip(id); if (c) { seekMs(c.at_ms); video.play(); S.stopAt = c.at_ms + c.duration_ms + 300; } break; }
+      case "here": brSave(id, { at_ms: Math.round(nowMs()) }, "B-roll spostato"); break;
+      case "nudge": { const c = brClip(id); if (c) brSave(id, { at_ms: Math.max(0, c.at_ms + Number(d.ms)) }); break; }
+      case "toggle": { const c = brClip(id); if (c) brSave(id, { enabled: !c.enabled }); break; }
+      case "del": BR.sel = null; await mutate(`/api/broll/${id}/delete`, {}, "B-roll tolto (Annulla lo rimette)"); break;
+      case "vo-pick": { const v = brVoice(id); if (v) { video.pause(); seekMs(Math.max(S.axisStart, v.at_ms - 300)); } openVoice(id); break; }
+      case "vo-play": { const v = brVoice(id); if (v) { BR.selVo = id; seekMs(v.at_ms); video.play(); S.stopAt = null; } break; }
+      case "vo-here": brSave(id, { at_ms: Math.round(nowMs()) }, "Voice-over spostato"); break;
+      case "vo-nudge": { const v = brVoice(id); if (v) brSave(id, { at_ms: Math.max(0, v.at_ms + Number(d.ms)) }); break; }
+      case "vo-toggle": { const v = brVoice(id); if (v) brSave(id, { enabled: !v.enabled }); break; }
+      case "vo-del": BR.selVo = null; await mutate(`/api/broll/${id}/delete`, {}, "Voice-over tolto (Annulla lo rimette)"); break;
+    }
+  });
+  box.addEventListener("input", (e) => {
+    const r = e.target.closest("[data-br-range]");
+    if (!r) return;
+    S.txSliding = r;
+    const k = r.dataset.brRange, v = Number(r.value);
+    const label = box.querySelector(`#br-${k}-val`);
+    if (label) label.textContent = k === "gain_db" ? dbTxt(v / 10) : brSec(v);
+  });
+  box.addEventListener("change", (e) => {
+    const m = e.target.closest("[data-br-mutecam]");
+    if (m) { brSave(m.dataset.id, { mute_camera: m.checked }); return; }
+    const r = e.target.closest("[data-br-range]");
+    if (!r) return;
+    S.txSliding = null;
+    const k = r.dataset.brRange, v = Number(r.value);
+    brSave(r.dataset.id, { [k]: k === "gain_db" ? v / 10 : v });
+  });
+  // trascinare file sul pannello: B-roll (video/foto) nella scheda B-roll, audio nella scheda Audio
+  box.addEventListener("dragover", (e) => {
+    if (["broll", "audio"].includes(tabOf()) && [...(e.dataTransfer?.types ?? [])].includes("Files")) { e.preventDefault(); box.classList.add("img-drop"); }
+  });
+  box.addEventListener("dragleave", () => box.classList.remove("img-drop"));
+  box.addEventListener("drop", (e) => {
+    const tab = tabOf();
+    box.classList.remove("img-drop");
+    if (!["broll", "audio"].includes(tab) || !e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    brUpload(e.dataTransfer.files, tab === "audio" ? "voice" : "broll");
+  });
+}
+
+// trascinare i blocchi nella timeline = spostare il B-roll o il voice-over
+function wireBrollTracks() {
+  for (const sel of ["#track-broll", "#track-vo"]) {
+    const el = $(sel);
+    el.addEventListener("mousedown", (e) => {
+      const b = e.target.closest("[data-brblk],[data-voblk]");
+      if (!b) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const id = b.dataset.brblk ?? b.dataset.voblk;
+      const item = brClip(id) ?? brVoice(id);
+      if (!item) return;
+      BR.drag = { id, x0: e.clientX, at0: item.at_ms, moved: false, el: b };
+    });
+  }
+  window.addEventListener("mousemove", (e) => {
+    const g = BR.drag;
+    if (!g) return;
+    const dx = e.clientX - g.x0;
+    if (Math.abs(dx) > 3) g.moved = true;
+    if (g.moved) g.el.style.left = `${xOf(g.at0) + dx}px`;
+  });
+  window.addEventListener("mouseup", (e) => {
+    const g = BR.drag;
+    if (!g) return;
+    BR.drag = null;
+    if (g.moved) {
+      const at = Math.max(0, Math.round(g.at0 + ((e.clientX - g.x0) / S.pps) * 1000));
+      brSave(g.id, { at_ms: at }, g.id.startsWith("vo_") ? "Voice-over spostato" : "B-roll spostato");
+    } else if (g.id.startsWith("vo_")) openVoice(g.id);
+    else openBroll(g.id);
+  });
+}
+
+// Anteprima: sopra il video si vede il B-roll del momento; il voice-over suona in sincrono col montato.
+function updateBroll(cur) {
+  const d = S.data?.broll;
+  const vEl = $("#broll-video"), iEl = $("#broll-img");
+  if (!d || !vEl) return;
+  const c = d.clips.filter((x) => x.enabled && cur >= x.at_ms && cur < x.at_ms + x.duration_ms).at(-1);
+  if (!c) {
+    if (vEl.classList.contains("on")) { vEl.classList.remove("on"); vEl.pause(); }
+    iEl.classList.remove("on");
+  } else if (c.kind === "image") {
+    if (vEl.classList.contains("on")) { vEl.classList.remove("on"); vEl.pause(); }
+    if (iEl.dataset.src !== c.url) { iEl.dataset.src = c.url; iEl.src = c.url; }
+    iEl.classList.add("on");
+  } else {
+    iEl.classList.remove("on");
+    if (vEl.dataset.src !== c.url) { vEl.dataset.src = c.url; vEl.src = c.url; }
+    vEl.classList.add("on");
+    const t = Math.min((c.src_ms + cur - c.at_ms) / 1000, Math.max(0, (c.media_ms || 1e9) / 1000 - 0.05));
+    if (Math.abs(vEl.currentTime - t) > (video.paused ? 0.02 : 0.2)) vEl.currentTime = t;
+    if (video.paused && !vEl.paused) vEl.pause();
+    else if (!video.paused && vEl.paused) vEl.play().catch(() => {});
+  }
+  // voice-over: tempo di riproduzione sul montato (i tagli non lo allungano né lo accorciano)
+  let duck = false;
+  const ids = new Set();
+  for (const v of d.voices) {
+    ids.add(v.id);
+    let au = BR.audios.get(v.id);
+    if (!au || au.dataset.src !== v.url) {
+      au = Object.assign(new Audio(v.url), { preload: "auto" });
+      au.dataset.src = v.url;
+      BR.audios.set(v.id, au);
+    }
+    const pos = S.mode === "edited" ? editedAt(cur) - editedAt(v.at_ms) : cur - v.at_ms;
+    const on = v.enabled && pos >= 0 && pos < v.duration_ms;
+    if (on && v.mute_camera) duck = true;
+    au.volume = Math.min(1, Math.pow(10, v.gain_db / 20));
+    if (on && !video.paused) {
+      if (Math.abs(au.currentTime * 1000 - pos) > 250) au.currentTime = pos / 1000;
+      if (au.paused) au.play().catch(() => {});
+    } else if (!au.paused) au.pause();
+  }
+  for (const [id, au] of BR.audios) if (!ids.has(id)) { au.pause(); BR.audios.delete(id); }
+  if (duck !== BR.duck) { BR.duck = duck; applyVoiceGain(); }
 }
 
 function imagesPanelHTML() {
@@ -4022,6 +4345,322 @@ function maybeAutoFx() {
   setTimeout(fxSuggest, 0);
 }
 
+// --- importa un raw (dal PC o da iCloud) e premontaggio ------------------------------------
+// Il video si carica dal computer (anche uno scaricato da iCloud) o si sceglie fra quelli già
+// nei Download / iCloud Drive; poi parte ingest + trascrizione + tagli e si apre il progetto nuovo.
+
+const IMP = { cands: null, folders: [], scanning: false, busy: "", opening: false };
+const impJob = () => S.data?.import ?? { status: "idle" };
+
+function importHTML() {
+  const j = impJob();
+  const running = j.status === "running" || Boolean(IMP.busy);
+  let status = "";
+  if (running) {
+    status = `<div class="imp-box run"><i class="spinner"></i><div><b>${esc(j.file ?? "")}</b>${j.project ? ` → progetto <code>${esc(j.project)}</code>` : ""}
+      <div class="meta">${esc(IMP.busy || j.label || "")}</div></div></div>`;
+  } else if (j.status === "done") {
+    status = `<div class="imp-box ok"><div>✓ Premontaggio pronto: progetto <b>${esc(j.project)}</b>.
+      ${j.can_open ? `<div class="btn-row"><button class="btn vfx-go" data-imp="open" data-p="${esc(j.project)}"${IMP.opening ? " disabled" : ""}>Apri il progetto</button></div>`
+        : `<div class="meta">Chiudi l'editor e lancia <code>autocut editor ${esc(j.project)}</code>.</div>`}</div></div>`;
+  } else if (j.status === "error") {
+    status = `<div class="imp-box err"><div>Non riuscito: ${esc(j.error ?? "errore")}
+      <div class="meta">Il video è comunque in <code>raw/${esc(j.project ?? "")}/</code>: sistema il problema (es. la chiave ElevenLabs nel file .env) e rilancia da terminale <code>autocut ingest</code>, <code>transcribe</code>, <code>cuts</code>.</div></div></div>`;
+  }
+  const cands = IMP.cands === null ? "" : IMP.cands.length
+    ? `<div class="st-list">${IMP.cands.map((c) => `
+        <button class="st-item${c.placeholder ? " dim" : ""}" data-imp="path" data-path="${esc(c.path)}"${running || c.placeholder ? " disabled" : ""}
+          title="${esc(c.path)}"><span class="t-ico on">🎞</span>
+          <span class="st-item-t">${esc(c.name)}<span class="meta">${c.placeholder ? "iCloud: non ancora scaricato" : `${c.size_mb} MB`} · ${esc(c.where)}</span></span></button>`).join("")}</div>`
+    : `<div class="tx-hint">Nessun video trovato in ${esc(IMP.folders.join(", ") || "Download")}.</div>`;
+  return `<div class="imp">
+    <div class="btn-row"><button class="btn vfx-go" data-imp="pick"${running ? " disabled" : ""}>＋ Importa un video</button>
+      <button class="btn" data-imp="scan"${running || IMP.scanning ? " disabled" : ""}>${IMP.scanning ? "Cerco…" : "🔎 Cerca nei Download e iCloud"}</button></div>
+    ${status}${cands}
+    <div class="tx-hint"><b>Da iCloud:</b> scarica il video sul PC (icloud.com → Scarica, oppure iCloud per Windows → «Scarica sempre sul dispositivo»), poi sceglilo qui o cercalo nei Download.
+      Il video viene copiato in <code>raw/</code> (l'originale non si tocca) e parte il premontaggio: riconosce il file, trascrive il parlato (ElevenLabs Scribe, a pagamento) e toglie le pause.</div>
+  </div>`;
+}
+
+async function impUpload(file) {
+  if (!file || IMP.busy) return;
+  IMP.busy = `Carico ${file.name.slice(0, 30)}… (resta aperta la pagina)`;
+  renderLeft();
+  try {
+    const res = await fetch(`/api/import/upload?name=${encodeURIComponent(file.name)}`, {
+      method: "POST", headers: { "content-type": "application/octet-stream" }, body: file,
+    });
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { msg = (await res.json()).detail || msg; } catch { /* vuoto */ }
+      throw new Error(msg);
+    }
+    S.data.import = await res.json();
+    toast("Video caricato: parte il premontaggio");
+  } catch (e) {
+    toast(e.message, true);
+  }
+  IMP.busy = "";
+  renderLeft();
+  managePolling();
+}
+
+async function impFromPath(path) {
+  try {
+    S.data.import = await api("/api/import/from-path", { path });
+    toast("Parte il premontaggio");
+  } catch (e) { toast(e.message, true); }
+  renderLeft();
+  managePolling();
+}
+
+async function impScan() {
+  IMP.scanning = true;
+  renderLeft();
+  try {
+    const d = await api("/api/import/candidates");
+    IMP.cands = d.items;
+    IMP.folders = d.folders ?? [];
+  } catch (e) { toast(e.message, true); }
+  IMP.scanning = false;
+  renderLeft();
+}
+
+async function impOpen(project) {
+  if (IMP.opening) return;
+  IMP.opening = true;
+  try {
+    await api("/api/import/open", { project });
+  } catch (e) { IMP.opening = false; toast(e.message, true); renderLeft(); return; }
+  $("#loading").textContent = `Apro il progetto ${project}: preparo l'anteprima, può volerci qualche minuto…`;
+  $("#loading").classList.remove("off");
+  await new Promise((r) => setTimeout(r, 2000));
+  for (let i = 0; i < 600; i++) {
+    try { await api("/api/import"); location.reload(); return; } catch { /* non ancora su */ }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  $("#loading").textContent = "L'editor non è ripartito: guarda il terminale.";
+}
+
+function wireImport(box) {
+  box.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-imp]");
+    if (!b || b.disabled) return;
+    switch (b.dataset.imp) {
+      case "pick": {
+        const input = Object.assign(document.createElement("input"), { type: "file", accept: "video/*,.mov,.mp4,.m4v,.mkv,.avi,.webm" });
+        input.addEventListener("change", () => impUpload(input.files[0]));
+        input.click();
+        break;
+      }
+      case "scan": impScan(); break;
+      case "path": impFromPath(b.dataset.path); break;
+      case "open": impOpen(b.dataset.p); break;
+    }
+  });
+  box.addEventListener("dragover", (e) => {
+    if (S.leftTab === "media" && [...(e.dataTransfer?.types ?? [])].includes("Files")) { e.preventDefault(); box.classList.add("img-drop"); }
+  });
+  box.addEventListener("dragleave", () => box.classList.remove("img-drop"));
+  box.addEventListener("drop", (e) => {
+    box.classList.remove("img-drop");
+    if (S.leftTab !== "media" || !e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    impUpload(e.dataTransfer.files[0]);
+  });
+}
+
+// --- Salva: punti di ripristino con nome ---------------------------------------------------
+// Ogni modifica si salva da sola nei file del progetto; qui si fissa una versione con un nome,
+// a cui si torna quando si vuole (anche dopo aver chiuso e riaperto l'editor).
+
+const VER = { open: false, name: "" };
+
+function renderVersions() {
+  const pop = $("#ver-pop");
+  if (!pop) return;
+  pop.hidden = !VER.open;
+  $("#btn-save")?.classList.toggle("on", VER.open);
+  if (!VER.open) return;
+  const when = (iso) => new Date(iso).toLocaleString("it-IT", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const list = (S.data?.versions ?? []).map((v) => `
+    <div class="ver-row"><div><b>${esc(v.name)}</b><div class="meta">${esc(when(v.created_at))}</div></div>
+      <button class="btn" data-ver="restore" data-id="${esc(v.id)}">Ripristina</button>
+      <button class="icon-btn" data-ver="del" data-id="${esc(v.id)}" title="Elimina questa versione">✕</button></div>`).join("");
+  const keep = document.activeElement?.id === "ver-name";
+  pop.innerHTML = `<div class="ver-head"><b>Salva il progetto</b><button class="icon-btn" data-ver="close" title="Chiudi">✕</button></div>
+    <p class="tx-hint">Ogni modifica è già salvata da sola. Qui fissi una <b>versione con un nome</b>: ci torni quando vuoi, anche dopo aver chiuso e riaperto l'editor (e Annulla annulla anche il ritorno).</p>
+    <div class="ver-new"><input id="ver-name" maxlength="60" placeholder="Nome, es. Prima delle grafiche" value="${esc(VER.name)}">
+      <button class="btn vfx-go" data-ver="save">💾 Salva</button></div>
+    <div class="st-sub">Versioni salvate (${(S.data?.versions ?? []).length})</div>
+    ${list || `<div class="tx-hint">Ancora nessuna versione.</div>`}`;
+  if (keep) { const t = $("#ver-name"); t.focus(); t.setSelectionRange(t.value.length, t.value.length); }
+}
+
+function wireVersions() {
+  $("#btn-save").addEventListener("click", () => { VER.open = !VER.open; renderVersions(); if (VER.open) $("#ver-name")?.focus(); });
+  const pop = $("#ver-pop");
+  pop.addEventListener("input", (e) => { if (e.target.id === "ver-name") VER.name = e.target.value; });
+  pop.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter" && e.target.id === "ver-name") saveVersion();
+    if (e.key === "Escape") { VER.open = false; renderVersions(); }
+  });
+  pop.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-ver]");
+    if (!b) return;
+    const id = b.dataset.id;
+    if (b.dataset.ver === "close") { VER.open = false; renderVersions(); }
+    else if (b.dataset.ver === "save") saveVersion();
+    else if (b.dataset.ver === "restore") {
+      if (confirm("Tornare a questa versione? Quello che hai fatto dopo si può recuperare con Annulla.")) {
+        await mutate(`/api/versions/${id}/restore`, {}, "Versione ripristinata");
+      }
+    } else if (b.dataset.ver === "del") {
+      if (confirm("Eliminare questa versione salvata?")) await mutate(`/api/versions/${id}/delete`, {}, "Versione eliminata");
+    }
+  });
+  document.addEventListener("mousedown", (e) => {
+    if (VER.open && !e.target.closest("#ver-pop, #btn-save")) { VER.open = false; renderVersions(); }
+  });
+}
+
+async function saveVersion(quick = false) {
+  const name = quick ? "" : VER.name.trim();
+  const d = new Date();
+  const label = name || `Versione ${d.toLocaleDateString("it-IT", { day: "numeric", month: "short" })} ${d.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}`;
+  if (await mutate("/api/versions", { name: label }, `Salvato: ${label}`)) VER.name = "";
+  renderVersions();
+}
+
+// --- icone a sinistra della timeline: cliccabili --------------------------------------------
+
+function openLeftTab(tab) {
+  if (S.viewer) { toggleViewerPanel(true, tab); return; }
+  if (S.leftTab !== tab) { S.leftTab = tab; renderLeft(); } else renderTextPanels();
+}
+
+function wireTimelineHeads() {
+  $(".tl-heads").addEventListener("click", (e) => {
+    const mute = e.target.closest("[data-head-mute]");
+    if (mute) {
+      const a = audioData();
+      if (a) saveAudio({ target: "mix", fields: { voice_muted: !a.voice_muted } }, a.voice_muted ? "Voce attiva" : "Voce muta");
+      return;
+    }
+    const h = e.target.closest(".head");
+    const cur = nowMs();
+    if (h?.classList.contains("text-head")) {
+      // modifica testo: la frase sotto la testina (o la prossima) si seleziona e si scrive nel pannello
+      let i = S.chunks.findIndex((c) => cur >= c.start && cur < c.end);
+      if (i < 0) i = S.chunks.findIndex((c) => c.start > cur);
+      if (i < 0) i = S.chunks.length - 1;
+      if (i >= 0) openCaptionEditor(i); else openLeftTab("text");
+    } else if (h?.classList.contains("video-head")) {
+      // la clip sotto la testina si seleziona: poi Togli (Canc), Dividi (Ctrl+B), o trascina i bordi
+      const p = visiblePieces().find((x) => x.keep && cur >= x.start && cur < x.end);
+      if (p) { selectPiece(p.start, p.end, false); toast("Clip selezionata: Dividi (Ctrl+B) o Togli (Canc)"); }
+      else toast("Qui non c'è nessuna clip tenuta: sposta la testina", true);
+    } else if (h?.classList.contains("audio-head") || h?.classList.contains("vo-head")) {
+      openLeftTab("audio");
+    } else if (h?.classList.contains("vfx-head")) openLeftTab("vfx");
+    else if (h?.classList.contains("broll-head")) openLeftTab("broll");
+  });
+}
+
+function renderHeadMute() {
+  const b = $("#head-mute");
+  if (!b) return;
+  const m = Boolean(audioData()?.voice_muted);
+  b.textContent = m ? "🔇" : "🔊";
+  b.classList.toggle("on", m);
+  b.title = m ? "La voce è muta: clic per riattivarla" : "Voce della clip: clic per mutarla (il volume è nella scheda Audio)";
+}
+
+// --- pannelli ridimensionabili (stile CapCut) --------------------------------------------
+// Maniglie fra i pannelli: si trascinano per ingrandire o rimpicciolire (doppio clic = misura
+// originale, frecce da tastiera = 20 px). Le misure restano salvate nel browser.
+
+const LAYOUT_KEY = "autocut-layout";
+const LAYOUT_DEF = { left: 330, right: 380, tl: 370, viewer: 340, askW: 400, askH: 560 };
+const LAYOUT_VAR = { left: "--left-w", right: "--right-w", tl: "--tl-h", viewer: "--viewer-w", askW: "--ask-w", askH: "--ask-h" };
+const L = { ...LAYOUT_DEF };
+
+function layoutLimits(k) {
+  const w = window.innerWidth, h = window.innerHeight;
+  const hi = {
+    left: w - L.right - 12 - 320, right: w - L.left - 12 - 320, tl: h - 44 - 18 - 220,
+    viewer: w - 360, askW: w - 36, askH: h - 36,
+  }[k];
+  const lo = { left: 200, right: 240, tl: 230, viewer: 240, askW: 300, askH: 300 }[k];
+  return [lo, Math.max(lo, hi)];
+}
+
+function layoutSet(k, v) {
+  const [lo, hi] = layoutLimits(k);
+  L[k] = Math.round(Math.min(hi, Math.max(lo, Number(v) || LAYOUT_DEF[k])));
+  document.documentElement.style.setProperty(LAYOUT_VAR[k], `${L[k]}px`);
+}
+
+function layoutSave() {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(L)); } catch { /* archivio non disponibile */ }
+}
+
+function layoutRefit() { // il lettore si adatta alla nuova misura del pannello
+  if (layoutRefit.raf) return;
+  layoutRefit.raf = requestAnimationFrame(() => { layoutRefit.raf = 0; fitFrame(); });
+}
+
+/** Rende `el` una maniglia: `axes` = [{key, axis: "x"|"y", dir}] (dir -1 = trascinando verso sinistra/alto cresce). */
+function wireResizer(el, axes) {
+  if (!el) return;
+  el.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    const start = { x: e.clientX, y: e.clientY }, base = Object.fromEntries(axes.map((a) => [a.key, L[a.key]]));
+    el.classList.add("drag");
+    document.body.classList.add("resizing", axes[0].axis === "x" ? "col" : "row");
+    const move = (ev) => {
+      for (const a of axes) layoutSet(a.key, base[a.key] + a.dir * (a.axis === "x" ? ev.clientX - start.x : ev.clientY - start.y));
+      layoutRefit();
+    };
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      el.classList.remove("drag");
+      document.body.classList.remove("resizing", "col", "row");
+      layoutSave();
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  });
+  el.addEventListener("dblclick", () => { axes.forEach((a) => layoutSet(a.key, LAYOUT_DEF[a.key])); layoutSave(); layoutRefit(); });
+  el.addEventListener("keydown", (e) => {
+    const step = { ArrowLeft: -20, ArrowUp: -20, ArrowRight: 20, ArrowDown: 20 }[e.key];
+    if (step == null) return;
+    e.preventDefault();
+    const a = axes[0];
+    if ((a.axis === "x") !== (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
+    layoutSet(a.key, L[a.key] + a.dir * step);
+    layoutSave();
+    layoutRefit();
+  });
+}
+
+function wireLayout() {
+  try { Object.assign(L, JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}")); } catch { /* misure di default */ }
+  if (L.tl === 300) L.tl = LAYOUT_DEF.tl; // misura vecchia: ora la timeline ha due tracce in più (B-roll, voice-over)
+  Object.keys(LAYOUT_VAR).forEach((k) => layoutSet(k, L[k]));
+  wireResizer($("#rz-left"), [{ key: "left", axis: "x", dir: 1 }]);
+  wireResizer($("#rz-right"), [{ key: "right", axis: "x", dir: -1 }]);
+  wireResizer($("#rz-tl"), [{ key: "tl", axis: "y", dir: -1 }]);
+  wireResizer($("#rz-viewer"), [{ key: "viewer", axis: "x", dir: -1 }]);
+  window.addEventListener("resize", () => Object.keys(LAYOUT_VAR).forEach((k) => layoutSet(k, L[k])));
+}
+
 // --- avvio ---------------------------------------------------------------------
 
 async function init() {
@@ -4037,7 +4676,9 @@ async function init() {
       $("#popup-layer").dataset.key = "";
       renderLeft();
     } catch { /* senza libreria: emoji col font */ }
+    wireLayout();
     wireEvents();
+    wireAsk();
     fitFrame();
     fitZoom();
     $("#loading").classList.add("off");
@@ -4045,6 +4686,720 @@ async function init() {
   } catch (e) {
     $("#loading").textContent = `Errore nel caricare il progetto: ${e.message}`;
   }
+}
+
+// --- Musica di sottofondo (libreria gratuita Audio Library su YouTube) ----------------------
+// Claude ascolta il parlato e lo stile, sceglie il mood e 5 brani (già scaricati: si ascoltano
+// subito), e il punto da cui farli partire. La musica va su tutto il video o su un tratto; volume,
+// muto, partenza e dissolvenze si cambiano qui. I crediti per la descrizione sono pronti da copiare.
+
+const MU = { range: null, note: "", q: "", results: null, searching: false, audios: new Map(), preview: null, sel: null };
+const muData = () => S.data?.music ?? { items: [], suggestion: null, job: { status: "idle" }, credits: "", catalog_count: 0 };
+const muSec = (s) => `${Math.floor((s ?? 0) / 60)}:${String(Math.round((s ?? 0) % 60)).padStart(2, "0")}`;
+const muRange = (a, b) => (a == null && b == null ? "tutto il video" : `${a == null ? "inizio" : showTime(a)} → ${b == null ? "fine" : showTime(b)}`);
+
+function muStopPreview() {
+  if (MU.preview) { MU.preview.pause(); MU.preview = null; }
+  document.querySelectorAll("[data-mu=preview].on").forEach((b) => b.classList.remove("on"));
+}
+
+function muPreview(url, offsetMs, db, btn) {
+  const same = MU.preview && MU.preview.dataset.src === url;
+  muStopPreview();
+  if (same) return;
+  const au = Object.assign(new Audio(url), { preload: "auto" });
+  au.dataset.src = url;
+  au.volume = Math.max(0.05, Math.min(1, Math.pow(10, (db + 14) / 20))); // ascolto: un po' più forte del mix
+  au.currentTime = (offsetMs ?? 0) / 1000;
+  au.play().catch(() => {});
+  MU.preview = au;
+  btn?.classList.add("on");
+}
+
+function muTrackLine(t) {
+  if (!t) return "";
+  return `<b>${esc(t.song || t.id)}</b> <span class="meta">${esc(t.artist || "")} · ${muSec(t.duration_s)}</span>
+    <div class="meta">${esc(t.mood || "")}${t.uses ? ` · per ${esc(t.uses)}` : ""}</div>`;
+}
+
+function musicCardHTML() {
+  const m = muData();
+  const job = m.job ?? {};
+  const running = job.status === "running";
+  const range = MU.range;
+  const items = m.items.map((it) => {
+    const t = it.track_info ?? {};
+    const secs = (t.breakdown ?? []).map((b) => `<option value="${b.at_s * 1000}"${Math.abs(b.at_s * 1000 - it.offset_ms) < 500 ? " selected" : ""}>${muSec(b.at_s)} · ${esc(b.text)}</option>`).join("");
+    return `<div class="mu-item${it.muted ? " dim" : ""}${MU.sel === it.id ? " on" : ""}">
+      <div class="mu-row"><button class="icon-btn" data-mu="preview" data-url="${esc(t.url || "")}" data-off="${it.offset_ms}" data-db="${it.preview_db}" title="Ascolta">▶</button>
+        <div class="mu-t">${muTrackLine(t)}<div class="meta">${esc(muRange(it.start_ms, it.end_ms))} · parte da ${muSec(it.offset_ms / 1000)}${it.origin === "ai" ? " · scelta da Claude" : ""}</div></div></div>
+      <div class="section-title">Volume <span class="tx-val" id="mu-val-${esc(it.id)}">${dbTxt(it.gain_db)}</span></div>
+      <input type="range" class="tx-range" data-mu-gain="${esc(it.id)}" min="-300" max="120" step="5" value="${Math.round(it.gain_db * 10)}">
+      ${secs ? `<div class="section-title">Parte da</div><select class="au-select" data-mu-offset="${esc(it.id)}"><option value="0"${it.offset_ms === 0 ? " selected" : ""}>0:00 · inizio del brano</option>${secs}</select>` : ""}
+      <div class="btn-row tx-actions">
+        <button class="btn${it.muted ? " on" : ""}" data-mu="mute" data-id="${esc(it.id)}">${it.muted ? "🔇 Muta" : "🔊 Attiva"}</button>
+        <button class="btn" data-mu="range" data-id="${esc(it.id)}" title="Usa il tratto scelto qui sotto (o tutto il video)">Tratto: ${range ? "quello scelto" : "tutto"}</button>
+        <button class="btn" data-mu="regen" title="Claude propone altri brani">↻ Rigenera</button>
+        <button class="btn danger" data-mu="remove" data-id="${esc(it.id)}">Togli</button>
+      </div></div>`;
+  }).join("");
+  const sug = m.suggestion;
+  const cands = (sug?.candidates ?? []).map((c, i) => {
+    const t = c.track_info ?? {};
+    const used = m.items.some((it) => it.track === c.id);
+    return `<div class="mu-cand${used ? " used" : ""}">
+      <button class="icon-btn" data-mu="preview" data-url="${esc(t.url || "")}" data-off="${c.offset_ms}" data-db="${c.preview_db}" title="Ascolta dal punto scelto">▶</button>
+      <div class="mu-t">${i === 0 ? `<span class="chip on">consigliata</span> ` : ""}${muTrackLine(t)}
+        <div class="meta">${c.section ? `parte da ${muSec(c.offset_ms / 1000)} (${esc(c.section)}) · ` : ""}${esc(c.why)}</div></div>
+      <button class="btn small" data-mu="use" data-track="${esc(c.id)}" data-off="${c.offset_ms}">${used ? "Di nuovo" : "Usa"}</button>
+    </div>`;
+  }).join("");
+  const res = (MU.results ?? []).map((t) => `
+    <div class="mu-cand">
+      <button class="icon-btn" data-mu="dl-play" data-track="${esc(t.id)}" title="${t.downloaded ? "Ascolta" : "Scarica e ascolta"}">${t.downloaded ? "▶" : "⤓"}</button>
+      <div class="mu-t">${muTrackLine({ ...t, duration_s: t.duration_s })}</div>
+      <button class="btn small" data-mu="use" data-track="${esc(t.id)}" data-off="0">Usa</button>
+    </div>`).join("");
+  const status = running ? `<div class="vfx-run"><i></i><span><b>${esc(job.progress || "scelgo la musica")}…</b></span></div>`
+    : job.status === "error" ? `<div class="tx-hint err">${esc(job.message)}</div>`
+      : job.message ? `<div class="tx-hint">${esc(job.message)}</div>` : "";
+  return `<div class="au-card mu-card">
+    <div class="au-head"><b>🎵 Musica di sottofondo</b><span class="meta">Audio Library · gratis</span></div>
+    ${m.style_music === false ? `<div class="tx-hint">Questo stile è pensato senza musica, ma puoi aggiungerla.</div>` : ""}
+    ${items || `<div class="tx-hint">Nessuna musica nel video.</div>`}
+    <div class="section-title">Dove</div>
+    <div class="btn-row tx-actions">
+      <button class="btn${range ? "" : " on"}" data-mu="all">Tutto il video</button>
+      <button class="btn" data-mu="from" title="L'inizio del tratto è dove c'è la testina">Da qui</button>
+      <button class="btn" data-mu="to" title="La fine del tratto è dove c'è la testina">A qui</button>
+    </div>
+    <div class="meta">Tratto: ${esc(range ? muRange(range.start_ms, range.end_ms) : "tutto il video")}</div>
+    <input class="au-select mu-note" data-mu-note placeholder="Facoltativo: es. più energica, niente lo-fi" value="${esc(MU.note)}" maxlength="200">
+    <button class="btn vfx-go" data-mu="suggest"${running ? " disabled" : ""}>✦ ${sug ? "Proponi altri brani" : "Scegli la musica con Claude"}</button>
+    ${status}
+    ${sug ? `<div class="st-sub">Proposte per il mood «${esc(sug.vibe)}» ${sug.start_ms != null || sug.end_ms != null ? `(${esc(muRange(sug.start_ms, sug.end_ms))})` : ""}</div><div class="mu-list">${cands}</div>` : ""}
+    <div class="st-sub">Cerca nella libreria (${m.catalog_count || "4000+"} brani)</div>
+    <div class="mu-search"><input class="au-select" data-mu-q placeholder="es. motivational cinematic, chill lo-fi" value="${esc(MU.q)}"><button class="btn" data-mu="search"${MU.searching ? " disabled" : ""}>${MU.searching ? "…" : "Cerca"}</button></div>
+    ${res ? `<div class="mu-list">${res}</div>` : ""}
+    ${m.credits ? `<div class="st-sub">Crediti da incollare nella descrizione</div>
+      <textarea class="mu-credits" readonly rows="4">${esc(m.credits)}</textarea>
+      <button class="btn small" data-mu="copy">Copia i crediti</button>` : ""}
+  </div>`;
+}
+
+const saveMusic = (body, msg) => mutate("/api/music/item", body, msg);
+
+function wireMusicPanel(box) {
+  box.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-mu]");
+    if (!b || b.disabled) return;
+    const d = b.dataset;
+    const m = muData();
+    switch (d.mu) {
+      case "preview":
+        if (!d.url) { toast("Brano non ancora scaricato", true); return; }
+        muPreview(d.url, Number(d.off), Number(d.db), b); break;
+      case "all": MU.range = null; renderTextPanels(); break;
+      case "from": MU.range = { start_ms: Math.round(nowMs()), end_ms: MU.range?.end_ms ?? null }; renderTextPanels(); break;
+      case "to": MU.range = { start_ms: MU.range?.start_ms ?? null, end_ms: Math.round(nowMs()) }; renderTextPanels(); break;
+      case "suggest": case "regen": {
+        const r = MU.range ?? {};
+        const out = await mutate("/api/music/suggest", { start_ms: r.start_ms ?? null, end_ms: r.end_ms ?? null, note: MU.note }, "Claude sceglie la musica (circa un minuto)");
+        if (out) managePolling();
+        break;
+      }
+      case "use": {
+        muStopPreview();
+        const r = MU.range ?? {};
+        await saveMusic({ action: "use", track: d.track, fields: { offset_ms: Number(d.off) || 0, start_ms: r.start_ms ?? null, end_ms: r.end_ms ?? null } }, "Musica nel video");
+        break;
+      }
+      case "mute": {
+        const it = m.items.find((x) => x.id === d.id);
+        if (it) saveMusic({ action: "update", id: it.id, fields: { muted: !it.muted } });
+        break;
+      }
+      case "range": {
+        const r = MU.range ?? {};
+        saveMusic({ action: "update", id: d.id, fields: { start_ms: r.start_ms ?? null, end_ms: r.end_ms ?? null } }, "Tratto della musica aggiornato");
+        break;
+      }
+      case "remove": muStopPreview(); saveMusic({ action: "remove", id: d.id }, "Musica tolta"); break;
+      case "search": {
+        MU.searching = true; renderTextPanels();
+        try {
+          const r = await api(`/api/music/search?q=${encodeURIComponent(MU.q)}`);
+          MU.results = r.results;
+        } catch (err) { toast(err.message, true); }
+        MU.searching = false; renderTextPanels();
+        break;
+      }
+      case "dl-play": {
+        b.textContent = "…";
+        try {
+          const r = await api("/api/music/download", { id: d.track });
+          apply(r);
+          const hit = (MU.results ?? []).find((x) => x.id === d.track);
+          if (hit) hit.downloaded = true;
+          renderTextPanels();
+          if (r.track?.url) muPreview(r.track.url, 0, -20, null);
+        } catch (err) { toast(err.message, true); b.textContent = "⤓"; }
+        break;
+      }
+      case "copy":
+        try { await navigator.clipboard.writeText(m.credits); toast("Crediti copiati"); } catch { toast("Selezionali e copiali a mano", true); }
+        break;
+    }
+  });
+  box.addEventListener("input", (e) => {
+    if (e.target.matches("[data-mu-note]")) MU.note = e.target.value;
+    else if (e.target.matches("[data-mu-q]")) MU.q = e.target.value;
+    else if (e.target.matches("[data-mu-gain]")) {
+      S.txSliding = e.target;
+      const v = Number(e.target.value) / 10;
+      const lab = box.querySelector(`#mu-val-${CSS.escape(e.target.dataset.muGain)}`);
+      if (lab) lab.textContent = dbTxt(v);
+    }
+  });
+  box.addEventListener("keydown", (e) => {
+    if (e.target.matches("[data-mu-q]") && e.key === "Enter") { e.preventDefault(); box.querySelector("[data-mu=search]")?.click(); }
+  });
+  box.addEventListener("change", (e) => {
+    if (e.target.matches("[data-mu-gain]")) {
+      S.txSliding = null;
+      saveMusic({ action: "update", id: e.target.dataset.muGain, fields: { gain_db: Number(e.target.value) / 10 } });
+    } else if (e.target.matches("[data-mu-offset]")) {
+      saveMusic({ action: "update", id: e.target.dataset.muOffset, fields: { offset_ms: Number(e.target.value) } }, "Punto di partenza cambiato");
+    }
+  });
+}
+
+// Anteprima: la musica suona sotto il video (tempo sul montato, come nel render).
+function updateMusic(cur) {
+  const m = muData();
+  const ids = new Set();
+  for (const it of m.items) {
+    const url = it.track_info?.url;
+    if (!url || it.muted) continue;
+    ids.add(it.id);
+    let au = MU.audios.get(it.id);
+    if (!au || au.dataset.src !== url) {
+      au?.pause();
+      au = Object.assign(new Audio(url), { preload: "auto", loop: true });
+      au.dataset.src = url;
+      MU.audios.set(it.id, au);
+    }
+    const a = it.start_ms ?? S.axisStart, b = it.end_ms ?? S.axisEnd;
+    const inside = cur >= a && cur < b && !(S.mode === "edited" && isCut(cur));
+    const pos = (S.mode === "edited" ? editedAt(cur) - editedAt(a) : cur - a) + it.offset_ms;
+    const dur = (it.track_info?.duration_s ?? 0) * 1000;
+    const t = dur > 0 ? pos % dur : pos;
+    const fadeIn = Math.min(1, (cur - a) / Math.max(1, it.fade_in_ms)), fadeOut = Math.min(1, (b - cur) / Math.max(1, it.fade_out_ms));
+    au.volume = Math.max(0, Math.min(1, Math.pow(10, it.preview_db / 20) * Math.max(0, Math.min(fadeIn, fadeOut))));
+    if (inside && !video.paused) {
+      if (Math.abs(au.currentTime * 1000 - t) > 300) au.currentTime = t / 1000;
+      if (au.paused) au.play().catch(() => {});
+    } else if (!au.paused) au.pause();
+  }
+  for (const [id, au] of MU.audios) if (!ids.has(id)) { au.pause(); MU.audios.delete(id); }
+}
+
+function musicTrackHTML() {
+  return muData().items.map((it) => {
+    const a = it.start_ms ?? S.axisStart, b = it.end_ms ?? S.axisEnd;
+    return `<div class="mu-bar${it.muted ? " muted" : ""}" style="left:${xOf(a)}px;width:${Math.max(6, xOf(b) - xOf(a))}px" title="🎵 ${esc(it.track_info?.song || it.track)}${it.muted ? " · muta" : ""}">🎵 ${esc(it.track_info?.song || "")}</div>`;
+  }).join("");
+}
+
+// --- Chiedi a Claude: chat collegata a Claude Code (Edita il video / Modifica l'editor) -----
+// Edita: selezioni un tratto (trascini) o un fotogramma (clic) sulla timeline e chiedi; Claude
+// usa gli strumenti dell'editor e le modifiche arrivano con un solo Annulla. Modifica l'editor:
+// Claude Code cambia il codice; alla fine la pagina si ricarica (e l'editor si riavvia se serve).
+
+const ASK_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const ASK_MAX_IMAGES = 4, ASK_MAX_BYTES = 8_000_000;
+const ASK = {
+  open: false, mode: "edit", text: "", sel: null, selecting: false, data: null, images: [],
+  timer: null, tick: null, handled: new Set(), first: true, waitingRestart: false,
+};
+const ASK_KEY = "autocut-ask";
+const ASK_STAR = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3 1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>`;
+
+function askLoadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem(ASK_KEY) || "{}");
+    ASK.open = !!p.open;
+    ASK.mode = p.mode === "dev" ? "dev" : "edit";
+    (p.handled ?? []).forEach((id) => ASK.handled.add(id));
+  } catch { /* niente preferenze salvate */ }
+}
+
+function askSavePrefs() {
+  try {
+    localStorage.setItem(ASK_KEY, JSON.stringify({ open: ASK.open, mode: ASK.mode, handled: [...ASK.handled].slice(-200) }));
+  } catch { /* archivio del browser non disponibile */ }
+}
+
+const askSec = (s) => (s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`);
+
+function askSelLabel(sel) {
+  if (!sel) return "";
+  if (sel.start_ms != null && sel.end_ms != null) return `${clock(sel.start_ms)} → ${clock(sel.end_ms)}`;
+  if (sel.frame_ms != null) return `fotogramma ${clock(sel.frame_ms)}`;
+  return "";
+}
+
+function askCaptions(sel) {
+  const a = sel.start_ms ?? sel.frame_ms, b = sel.end_ms ?? sel.frame_ms;
+  const scenes = S.data?.text?.scenes ?? {};
+  return (S.chunks ?? []).filter((c) => c.end >= a && c.start <= b).slice(0, 80)
+    .map((c) => ({ id: c.id, text: c.text, start_ms: c.start, end_ms: c.end, scale: scenes[c.id]?.scale ?? 1, edited: !!scenes[c.id] }));
+}
+
+function askMessageHTML(m) {
+  const sel = m.selection ? `<span class="ask-chip">${esc(askSelLabel(m.selection))}</span>` : "";
+  const mode = m.mode === "dev" ? "Modifica l'editor" : "Edita il video";
+  const shots = (m.images ?? []).length
+    ? `<div class="ask-shots">${m.images.map((n) => `<a class="ask-shot" href="/api/assistant/image/${esc(n)}" target="_blank" rel="noopener"><img src="/api/assistant/image/${esc(n)}" alt="screenshot"></a>`).join("")}</div>` : "";
+  const user = `<div class="ask-msg me"><div class="ask-meta">${esc(mode)} ${sel}</div>${shots}<div>${esc(m.prompt)}</div></div>`;
+  let body;
+  if (m.status === "running") {
+    const el = Date.now() / 1000 - (m.t0 ?? Date.now() / 1000);
+    const steps = (m.steps ?? []).slice(-5).map((s) => `<li><span>${esc(askSec(s.t))}</span>${esc(s.text)}</li>`).join("");
+    body = `<div class="ask-run"><i></i><b>Claude sta lavorando</b><span class="ask-el" data-t0="${m.t0}">${askSec(el)}</span></div>
+      ${steps ? `<ul class="ask-steps">${steps}</ul>` : `<div class="ask-meta">Leggo la richiesta…</div>`}`;
+  } else if (m.status === "error") {
+    body = `<div class="ask-err">Non riuscito: ${esc(m.error || "errore")}</div>`;
+  } else {
+    const files = m.mode === "dev"
+      ? [...(m.files?.changed ?? []), ...(m.files?.added ?? [])]
+      : (m.changed ?? []);
+    const list = files.length ? `<details><summary class="ask-meta">${files.length} file ${m.mode === "dev" ? "di codice" : "del progetto"} cambiati</summary><div class="ask-files">${files.map(esc).join("<br>")}</div></details>` : "";
+    const steps = (m.steps ?? []).length ? `<details><summary class="ask-meta">Cosa ha fatto (${m.steps.length} passi, ${askSec(m.elapsed_s ?? 0)})</summary><ul class="ask-steps">${m.steps.map((s) => `<li><span>${esc(askSec(s.t))}</span>${esc(s.text)}</li>`).join("")}</ul></details>` : "";
+    const missing = m.missing ? `<div class="ask-missing">Manca all'editor: ${esc(m.missing)}
+      <button class="btn" data-ask="build" data-text="${esc(m.missing)}">Aggiungilo all'editor</button></div>` : "";
+    const how = m.how_to_use ? `<div class="ask-meta">Dove lo trovi: ${esc(m.how_to_use)}</div>` : "";
+    const tests = m.tests ? `<div class="ask-meta">Controlli: ${esc(m.tests)}</div>` : "";
+    const revert = m.mode === "dev" && files.length
+      ? (m.reverted ? `<div class="ask-meta">Modifiche annullate.</div>` : `<button class="btn" data-ask="revert" data-id="${esc(m.id)}">Annulla modifiche</button>`)
+      : "";
+    const undo = m.mode === "edit" && files.length ? `<div class="ask-meta">Applicato: lo togli con Annulla (Ctrl+Z).</div>` : "";
+    body = `<div class="ask-sum">${esc(m.summary || "Fatto.").replace(/\n/g, "<br>")}</div>${how}${tests}${missing}${undo}${list}${steps}${revert}`;
+  }
+  return `${user}<div class="ask-msg claude"><div class="ask-meta">${ASK_STAR} Claude</div>${body}</div>`;
+}
+
+function renderAsk() {
+  const fab = $("#ask-fab"), panel = $("#ask-panel");
+  if (!fab || !panel) return;
+  fab.hidden = ASK.open;
+  panel.hidden = !ASK.open;
+  document.body.classList.toggle("ask-selecting", ASK.selecting);
+  renderAskSel();
+  if (!ASK.open) return;
+  const d = ASK.data ?? { messages: [], running: false };
+  const msgs = d.messages.map(askMessageHTML).join("");
+  const edit = ASK.mode === "edit";
+  const hint = edit
+    ? "Es. «la scritta più grande con bagliore e fade» · «bianco e nero e sotto la frase l'emoji del pianto»"
+    : "Es. «aggiungi una scheda per…» · «nel pannello Audio voglio un pulsante che…»";
+  const selRow = edit ? `<div class="ask-selrow">${ASK.sel
+    ? `<span class="ask-chip on">${esc(askSelLabel(ASK.sel))}</span><button class="btn" data-ask="unsel" title="Togli la selezione">✕</button>`
+    : `<span class="ask-meta">Nessuna selezione: vale per tutto il video</span>`}
+    <button class="btn${ASK.selecting ? " on" : ""}" data-ask="select">${ASK.selecting ? "Trascina sulla timeline…" : "Seleziona sulla timeline"}</button></div>` : "";
+  const box = panel.querySelector(".ask-list");
+  const keepScroll = box && box.scrollHeight - box.scrollTop - box.clientHeight > 40 ? box.scrollTop : null;
+  const focused = document.activeElement?.id === "ask-text";
+  panel.innerHTML = `<div class="ask-head">${ASK_STAR}<b>Chiedi a Claude</b>
+      <button class="icon-btn" data-ask="clear" title="Nuova conversazione">⟲</button><button class="icon-btn" data-ask="close" title="Chiudi">✕</button></div>
+    <div class="ask-tabs"><button class="${edit ? "on" : ""}" data-ask="mode" data-v="edit">Edita il video</button><button class="${edit ? "" : "on"}" data-ask="mode" data-v="dev">Modifica l'editor</button></div>
+    <div class="ask-list">${msgs || `<div class="ask-empty">${edit
+      ? "Seleziona un tratto o un fotogramma e chiedi cosa fare: Claude sceglie gli strumenti dell'editor (testi, effetti, pop-up, suoni, tagli) e applica le modifiche."
+      : "Chiedi una nuova funzione o una modifica all'editor: Claude Code lavora sul codice come in una sessione normale, ti mostra cosa sta facendo e alla fine l'editor si ricarica da solo."}</div>`}</div>
+    ${selRow}
+    ${ASK.images.length ? `<div class="ask-shots">${ASK.images.map((im, i) => `<div class="ask-shot"><img src="${im}" alt="screenshot ${i + 1}"><button data-ask="rmshot" data-i="${i}" title="Togli l'immagine">✕</button></div>`).join("")}</div>` : ""}
+    <div class="ask-tools"><button class="btn" data-ask="shot" title="Fai uno screenshot dell'editor, evidenzia un punto e allegalo qui">📸 Screenshot</button>
+      <button class="btn" data-ask="attach" title="Allega un'immagine (o incolla con Ctrl+V, o trascinala qui)">📎 Immagine</button>
+      <span class="ask-meta">Mostrami cosa vedi</span></div>
+    <div class="ask-input"><textarea id="ask-text" rows="2" maxlength="4000" placeholder="${esc(hint)}">${esc(ASK.text)}</textarea>
+      <button class="btn vfx-go" data-ask="send"${d.running ? " disabled" : ""}>${d.running ? "Lavora…" : "Invia"}</button></div>`;
+  panel.append(...askHandles); // le maniglie per ingrandire/rimpicciolire non si perdono col ridisegno
+  const list = panel.querySelector(".ask-list");
+  list.scrollTop = keepScroll ?? list.scrollHeight;
+  if (focused) { const t = $("#ask-text"); t.focus(); t.setSelectionRange(t.value.length, t.value.length); }
+}
+
+function renderAskSel() {
+  const el = $("#ask-sel");
+  if (!el) return;
+  const sel = ASK.open && ASK.mode === "edit" ? ASK.sel : null;
+  if (!sel) { el.hidden = true; return; }
+  const a = sel.start_ms ?? sel.frame_ms, b = sel.end_ms ?? sel.frame_ms;
+  el.hidden = false;
+  el.classList.toggle("point", sel.start_ms == null);
+  el.style.left = `${xOf(a)}px`;
+  el.style.width = `${Math.max(2, xOf(b) - xOf(a))}px`;
+}
+
+async function askRefresh() {
+  try {
+    askOnData(await api("/api/assistant"));
+  } catch { /* l'editor si sta riavviando o è spento: si riprova */ }
+}
+
+function askOnData(d) {
+  const prev = new Map((ASK.data?.messages ?? []).map((m) => [m.id, m.status]));
+  ASK.data = d;
+  if (ASK.first) { // all'apertura: quello già finito non fa ricaricare la pagina
+    d.messages.filter((m) => m.status !== "running").forEach((m) => ASK.handled.add(m.id));
+    ASK.first = false;
+    askSavePrefs();
+  }
+  for (const m of d.messages) {
+    if (m.status === "running" || ASK.handled.has(m.id)) continue;
+    ASK.handled.add(m.id);
+    askSavePrefs();
+    if (m.mode === "edit" && prev.get(m.id) === "running" && (m.changed ?? []).length) {
+      api("/api/project").then(apply).catch(() => {});
+      toast("Claude ha modificato il video");
+    }
+    if (m.mode === "dev" && m.status === "done" && !m.reverted) {
+      const files = [...(m.files?.changed ?? []), ...(m.files?.added ?? [])];
+      if (m.restart && d.can_restart) { renderAsk(); askRestart(); return; }
+      if (m.restart) toast("Modifica pronta: chiudi e rilancia l'editor per usarla", true);
+      else if (files.length) { toast("Modifica pronta: ricarico l'editor"); setTimeout(() => location.reload(), 1200); }
+    }
+  }
+  renderAsk();
+  askPolling();
+}
+
+async function askRestart() {
+  if (ASK.waitingRestart) return;
+  ASK.waitingRestart = true;
+  $("#loading").textContent = "Claude ha cambiato l'editor: lo riavvio con il codice nuovo…";
+  $("#loading").classList.remove("off");
+  try { await api("/api/assistant/restart", {}); } catch { /* già in riavvio */ }
+  await new Promise((r) => setTimeout(r, 1500));
+  for (let i = 0; i < 120; i++) {
+    try { await api("/api/assistant"); location.reload(); return; } catch { /* non ancora su */ }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  $("#loading").textContent = "L'editor non è ripartito: guarda il terminale e rilancialo.";
+}
+
+function askPolling() {
+  const running = ASK.data?.running;
+  if (running && !ASK.timer) ASK.timer = setInterval(askRefresh, 1500);
+  else if (!running && ASK.timer) { clearInterval(ASK.timer); ASK.timer = null; }
+  if (running && !ASK.tick) {
+    ASK.tick = setInterval(() => document.querySelectorAll(".ask-el").forEach((e) => {
+      e.textContent = askSec(Date.now() / 1000 - Number(e.dataset.t0));
+    }), 1000);
+  } else if (!running && ASK.tick) { clearInterval(ASK.tick); ASK.tick = null; }
+}
+
+async function askSend() {
+  const text = ASK.text.trim(), images = ASK.images;
+  if (!text && !images.length) { toast("Scrivi cosa vuoi fare", true); return; }
+  const body = { mode: ASK.mode, prompt: text, selection: null, images };
+  if (ASK.mode === "edit" && ASK.sel) body.selection = { ...ASK.sel, captions: askCaptions(ASK.sel) };
+  try {
+    ASK.text = "";
+    ASK.images = [];
+    askOnData(await api("/api/assistant", body));
+  } catch (e) { ASK.text = text; ASK.images = images; renderAsk(); toast(e.message, true); }
+}
+
+// screenshot: incolla (Ctrl+V), trascina sul pannello o scegli un file
+function askAddFiles(files) {
+  const imgs = [...files].filter((f) => f.type.startsWith("image/"));
+  if (!imgs.length) return false;
+  const ok = [];
+  for (const f of imgs) {
+    if (!ASK_TYPES.includes(f.type)) { toast("Servono immagini PNG, JPG, WEBP o GIF", true); continue; }
+    if (f.size > ASK_MAX_BYTES) { toast("Immagine troppo grande (massimo 8 MB)", true); continue; }
+    if (ASK.images.length + ok.length >= ASK_MAX_IMAGES) { toast(`Al massimo ${ASK_MAX_IMAGES} immagini per messaggio`, true); break; }
+    ok.push(f);
+  }
+  Promise.all(ok.map((f) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result));
+    r.onerror = rej;
+    r.readAsDataURL(f);
+  }))).then((urls) => {
+    ASK.images = [...ASK.images, ...urls].slice(0, ASK_MAX_IMAGES);
+    if (!ASK.open) { ASK.open = true; askSavePrefs(); }
+    renderAsk();
+  }).catch(() => toast("Non riesco a leggere l'immagine", true));
+  return true;
+}
+
+function askPickFile() {
+  const input = Object.assign(document.createElement("input"), { type: "file", accept: ASK_TYPES.join(","), multiple: true });
+  input.addEventListener("change", () => askAddFiles(input.files));
+  input.click();
+}
+
+// --- strumento screenshot: cattura la pagina, ritaglia/evidenzia, e va dritto nella chat ---
+// Usa la cattura schermo del browser (getDisplayMedia): si sceglie «questa scheda», si vede
+// l'editor com'è (video compreso), si marca il punto e «Allega alla chat» lo mette nel messaggio.
+
+const SHOT = { cv: null, ctx: null, tool: "rect", crop: null, marks: [], cur: null };
+const SHOT_RED = "#ff2d55";
+
+async function shotStart() {
+  if (!navigator.mediaDevices?.getDisplayMedia) { toast("Questo browser non può catturare lo schermo", true); return; }
+  if (ASK.images.length >= ASK_MAX_IMAGES) { toast(`Al massimo ${ASK_MAX_IMAGES} immagini per messaggio`, true); return; }
+  document.body.classList.add("shooting"); // la chat non deve finire nello screenshot
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false, preferCurrentTab: true, selfBrowserSurface: "include" });
+  } catch {
+    document.body.classList.remove("shooting");
+    toast("Screenshot annullato");
+    return;
+  }
+  try {
+    await new Promise((r) => setTimeout(r, 400)); // il selettore del browser deve sparire
+    const video = Object.assign(document.createElement("video"), { srcObject: stream, muted: true });
+    await video.play();
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const cv = document.createElement("canvas");
+    cv.width = video.videoWidth; cv.height = video.videoHeight;
+    cv.getContext("2d").drawImage(video, 0, 0);
+    shotOpen(cv);
+  } catch {
+    toast("Non sono riuscito a catturare lo schermo", true);
+  } finally {
+    stream.getTracks().forEach((t) => t.stop());
+    document.body.classList.remove("shooting");
+  }
+}
+
+function shotOpen(src) {
+  shotClose();
+  Object.assign(SHOT, { src, tool: "rect", crop: null, marks: [], cur: null });
+  const el = document.createElement("div");
+  el.className = "shot"; el.id = "shot";
+  el.innerHTML = `<div class="shot-bar">
+      <b>Screenshot</b>
+      <div class="seg-toggle" id="shot-tools">
+        <button data-shot-tool="crop" title="Trascina per tenere solo un punto della pagina">✂ Ritaglia</button>
+        <button data-shot-tool="rect" class="on" title="Cerchia o evidenzia un punto">▭ Evidenzia</button>
+        <button data-shot-tool="pen" title="Disegna a mano libera">✎ Penna</button>
+      </div>
+      <button class="btn" data-shot="undo" title="Toglie l'ultimo segno (Ctrl+Z)">Annulla segno</button>
+      <button class="btn" data-shot="full" title="Rimette tutta la pagina">Pagina intera</button>
+      <span class="shot-hint">Tutta la pagina, oppure Ritaglia un punto · poi evidenzia</span>
+      <button class="btn" data-shot="close" title="Chiudi senza inviare (Esc)">Chiudi</button>
+      <button class="btn vfx-go" data-shot="send" title="Mette lo screenshot nella chat (Invio)">Allega alla chat</button>
+    </div>
+    <div class="shot-stage"><canvas id="shot-cv"></canvas></div>`;
+  document.body.append(el);
+  SHOT.cv = $("#shot-cv");
+  SHOT.cv.width = src.width; SHOT.cv.height = src.height;
+  SHOT.ctx = SHOT.cv.getContext("2d");
+  shotPaint();
+  el.addEventListener("click", (e) => {
+    const t = e.target.closest("[data-shot-tool]"), a = e.target.closest("[data-shot]");
+    if (t) {
+      SHOT.tool = t.dataset.shotTool;
+      el.querySelectorAll("[data-shot-tool]").forEach((b) => b.classList.toggle("on", b === t));
+    } else if (a?.dataset.shot === "undo") { SHOT.marks.pop(); shotPaint(); }
+    else if (a?.dataset.shot === "full") { SHOT.crop = null; shotPaint(); }
+    else if (a?.dataset.shot === "close") shotClose();
+    else if (a?.dataset.shot === "send") shotSend();
+  });
+  const pt = (e) => {
+    const r = SHOT.cv.getBoundingClientRect();
+    return { x: Math.max(0, Math.min(src.width, ((e.clientX - r.left) / r.width) * src.width)),
+             y: Math.max(0, Math.min(src.height, ((e.clientY - r.top) / r.height) * src.height)) };
+  };
+  SHOT.cv.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    SHOT.cv.setPointerCapture(e.pointerId);
+    const p = pt(e);
+    SHOT.cur = SHOT.tool === "pen" ? { type: "pen", pts: [p] } : { type: SHOT.tool, a: p, b: p };
+    shotPaint();
+  });
+  SHOT.cv.addEventListener("pointermove", (e) => {
+    if (!SHOT.cur) return;
+    const p = pt(e);
+    if (SHOT.cur.type === "pen") SHOT.cur.pts.push(p); else SHOT.cur.b = p;
+    shotPaint();
+  });
+  const end = () => {
+    const c = SHOT.cur;
+    SHOT.cur = null;
+    if (!c) return;
+    if (c.type === "pen") { if (c.pts.length > 1) SHOT.marks.push(c); }
+    else if (Math.abs(c.a.x - c.b.x) > 6 && Math.abs(c.a.y - c.b.y) > 6) {
+      if (c.type === "crop") SHOT.crop = shotRect(c); else SHOT.marks.push(c);
+    }
+    shotPaint();
+  };
+  SHOT.cv.addEventListener("pointerup", end);
+  SHOT.cv.addEventListener("pointercancel", end);
+}
+
+const shotRect = (c) => ({ x: Math.min(c.a.x, c.b.x), y: Math.min(c.a.y, c.b.y), w: Math.abs(c.a.x - c.b.x), h: Math.abs(c.a.y - c.b.y) });
+
+/** Disegna immagine + segni. `ui` = anteprima (ombra fuori dal ritaglio e cornice), altrimenti file finale. */
+function shotPaint(ctx = SHOT.ctx, ui = true) {
+  const { src } = SHOT, lw = Math.max(3, src.width / 320);
+  ctx.drawImage(src, 0, 0);
+  const all = SHOT.cur && SHOT.cur.type !== "crop" ? [...SHOT.marks, SHOT.cur] : SHOT.marks;
+  ctx.lineWidth = lw; ctx.strokeStyle = SHOT_RED; ctx.lineJoin = ctx.lineCap = "round";
+  for (const m of all) {
+    ctx.beginPath();
+    if (m.type === "pen") m.pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    else { const r = shotRect(m); ctx.rect(r.x, r.y, r.w, r.h); }
+    ctx.stroke();
+  }
+  if (!ui) return;
+  const crop = SHOT.cur?.type === "crop" ? shotRect(SHOT.cur) : SHOT.crop;
+  if (!crop) return;
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,.55)";
+  ctx.beginPath();
+  ctx.rect(0, 0, src.width, src.height);
+  ctx.rect(crop.x, crop.y, crop.w, crop.h);
+  ctx.fill("evenodd");
+  ctx.setLineDash([lw * 3, lw * 2]); ctx.strokeStyle = "#fff"; ctx.lineWidth = Math.max(2, lw * .6);
+  ctx.strokeRect(crop.x, crop.y, crop.w, crop.h);
+  ctx.restore();
+}
+
+function shotClose() {
+  $("#shot")?.remove();
+  SHOT.cv = SHOT.ctx = SHOT.src = null;
+}
+
+function shotSend() {
+  if (!SHOT.src) return;
+  if (ASK.images.length >= ASK_MAX_IMAGES) { toast(`Al massimo ${ASK_MAX_IMAGES} immagini per messaggio`, true); return; }
+  const crop = SHOT.crop ?? { x: 0, y: 0, w: SHOT.src.width, h: SHOT.src.height };
+  const scale = Math.min(1, 2400 / crop.w);
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(crop.w * scale)); out.height = Math.max(1, Math.round(crop.h * scale));
+  const ctx = out.getContext("2d");
+  ctx.scale(scale, scale); ctx.translate(-crop.x, -crop.y);
+  shotPaint(ctx, false);
+  let url = out.toDataURL("image/png");
+  if (url.length * 0.75 > ASK_MAX_BYTES * 0.9) url = out.toDataURL("image/jpeg", 0.88);
+  ASK.images.push(url);
+  ASK.open = true; ASK.selecting = false; askSavePrefs();
+  shotClose();
+  renderAsk();
+  $("#ask-text")?.focus();
+  toast("Screenshot nella chat: scrivi cosa vuoi e premi Invio");
+}
+
+window.addEventListener("keydown", (e) => {
+  if (!$("#shot")) return;
+  e.stopPropagation(); // le scorciatoie dell'editor non devono scattare sotto lo screenshot
+  if (e.key === "Escape") shotClose();
+  else if (e.key === "Enter") shotSend();
+  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); SHOT.marks.pop(); shotPaint(); }
+}, true);
+
+const askHandles = ["l", "t", "tl"].map((c) => Object.assign(document.createElement("div"), {
+  className: `ask-rz ${c}`, title: "Trascina per ingrandire o rimpicciolire la chat (doppio clic: misura originale)",
+}));
+wireResizer(askHandles[0], [{ key: "askW", axis: "x", dir: -1 }]);
+wireResizer(askHandles[1], [{ key: "askH", axis: "y", dir: -1 }]);
+wireResizer(askHandles[2], [{ key: "askW", axis: "x", dir: -1 }, { key: "askH", axis: "y", dir: -1 }]);
+
+function wireAsk() {
+  askLoadPrefs();
+  const fab = $("#ask-fab"), panel = $("#ask-panel");
+  if (!fab || !panel) return;
+  fab.innerHTML = `${ASK_STAR}<span>Chiedi a Claude</span>`;
+  fab.addEventListener("click", () => { ASK.open = true; askSavePrefs(); renderAsk(); $("#ask-text")?.focus(); });
+  panel.addEventListener("input", (e) => { if (e.target.id === "ask-text") ASK.text = e.target.value; });
+  // Ctrl+V di uno screenshot: vale nella chat e anche con il cursore altrove nell'editor
+  document.addEventListener("paste", (e) => {
+    if (!ASK.open) return;
+    const t = e.target, typing = t.closest?.("input, textarea, [contenteditable]");
+    if (typing && !panel.contains(t)) return; // un altro campo di testo dell'editor: incolla normale
+    const files = [...(e.clipboardData?.files ?? [])];
+    if (files.some((f) => f.type.startsWith("image/")) && askAddFiles(files)) e.preventDefault();
+  });
+  panel.addEventListener("dragover", (e) => {
+    if ([...(e.dataTransfer?.types ?? [])].includes("Files")) { e.preventDefault(); panel.classList.add("dropping"); }
+  });
+  panel.addEventListener("dragleave", (e) => { if (!panel.contains(e.relatedTarget)) panel.classList.remove("dropping"); });
+  panel.addEventListener("drop", (e) => {
+    panel.classList.remove("dropping");
+    if (e.dataTransfer?.files?.length && askAddFiles(e.dataTransfer.files)) e.preventDefault();
+  });
+  panel.addEventListener("keydown", (e) => {
+    e.stopPropagation(); // le scorciatoie dell'editor (spazio, Canc…) non devono scattare qui
+    if (e.target.id === "ask-text" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); askSend(); }
+  });
+  panel.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-ask]");
+    if (!b) return;
+    switch (b.dataset.ask) {
+      case "close": ASK.open = false; ASK.selecting = false; askSavePrefs(); renderAsk(); break;
+      case "mode": ASK.mode = b.dataset.v; ASK.selecting = false; askSavePrefs(); renderAsk(); break;
+      case "select": ASK.selecting = !ASK.selecting; renderAsk(); break;
+      case "unsel": ASK.sel = null; renderAsk(); break;
+      case "send": askSend(); break;
+      case "attach": askPickFile(); break;
+      case "shot": shotStart(); break;
+      case "rmshot": ASK.images.splice(Number(b.dataset.i), 1); renderAsk(); break;
+      case "build": ASK.mode = "dev"; ASK.text = `Aggiungi all'editor: ${b.dataset.text}`; askSavePrefs(); renderAsk(); $("#ask-text")?.focus(); break;
+      case "clear":
+        if (confirm("Cominciare una nuova conversazione con Claude?")) {
+          try { askOnData(await api("/api/assistant/clear", {})); } catch (err) { toast(err.message, true); }
+        }
+        break;
+      case "revert":
+        if (confirm("Rimettere il codice dell'editor com'era prima di questa modifica?")) {
+          try {
+            const d = await api(`/api/assistant/${b.dataset.id}/revert`, {});
+            const py = d.messages.find((x) => x.id === b.dataset.id)?.restart;
+            askOnData(d);
+            toast(py && d.can_restart ? "Modifiche annullate: riavvio l'editor" : "Modifiche annullate: ricarico l'editor");
+            if (py && d.can_restart) askRestart(); else setTimeout(() => location.reload(), 1200);
+          } catch (err) { toast(err.message, true); }
+        }
+        break;
+    }
+  });
+  // selezione sulla timeline: trascina = tratto, clic = fotogramma (prima degli altri gestori)
+  const tl = $("#tl-content");
+  let drag = null;
+  tl.addEventListener("pointerdown", (e) => {
+    if (!ASK.selecting) return;
+    e.preventDefault(); e.stopPropagation();
+    const r = tl.getBoundingClientRect();
+    drag = { a: msOf(e.clientX - r.left), r };
+    tl.setPointerCapture(e.pointerId);
+    ASK.sel = { frame_ms: Math.round(drag.a) };
+    renderAskSel();
+  }, true);
+  tl.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    e.stopPropagation();
+    const b = msOf(e.clientX - drag.r.left);
+    if (Math.abs(xOf(b) - xOf(drag.a)) > 4) ASK.sel = { start_ms: Math.round(Math.min(drag.a, b)), end_ms: Math.round(Math.max(drag.a, b)) };
+    renderAskSel();
+  }, true);
+  tl.addEventListener("pointerup", (e) => {
+    if (!drag) return;
+    e.stopPropagation();
+    drag = null;
+    ASK.selecting = false;
+    seekMs(ASK.sel.frame_ms ?? ASK.sel.start_ms);
+    renderAsk();
+    $("#ask-text")?.focus();
+  }, true);
+  tl.addEventListener("click", (e) => { if (ASK.selecting || drag) { e.stopPropagation(); e.preventDefault(); } }, true);
+  renderAsk();
+  askRefresh();
 }
 
 init();
