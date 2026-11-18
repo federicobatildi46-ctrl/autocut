@@ -1,0 +1,21 @@
+{
+  "name": "autocut-motion",
+  "private": true,
+  "description": "Motion graphics per autocut (Remotion)",
+  "scripts": {
+    "studio": "remotion studio",
+    "still": "remotion still",
+    "render": "remotion render"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.541",
+    "@remotion/transitions": "4.0.541",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "remotion": "4.0.541"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^5.6.0"
+  }
+}

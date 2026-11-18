@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "id": "viral",
+  "name": "Viral provinciale",
+  "description": "CapCut classico, dinamico ed economico: jump cut serrati con zoom secchi a ogni taglio, colori saturi da telefono, hook-copertina centrato nei primi 3 secondi (aggancio colorato, riga GRANDE bianca col bordo del brand, sottotitolo piccolo), poi sottotitoli piccoli e bassi in minuscolo col bordo nero e la parola chiave colorata, pop su ogni scritta, sticker ed emoji. Reference: CRABBOX + Vittorio Gucci.",
+  "fonts": {
+    "display": {
+      "family": "Lilita One",
+      "source": "google",
+      "weights": [
+        400
+      ],
+      "license": "OFL"
+    }
+  },
+  "grade": {
+    "contrast": 1.06,
+    "saturation": 1.28,
+    "brightness": 1.04,
+    "warmth": 0.04,
+    "vignette": 0
+  },
+  "pacing": {
+    "camera": "handheld",
+    "target_shot_s": 2.2,
+    "punch_in": {
+      "enabled": true,
+      "scale": 1.16,
+      "mode": "cut_alternate",
+      "ease_ms": 0
+    },
+    "pauses": {
+      "threshold_ms": 450,
+      "margin_ms": 90
+    }
+  },
+  "captions": {
+    "font": "display",
+    "weight": 400,
+    "case": "lower",
+    "size_scale": 1.05,
+    "max_words": 3,
+    "max_chars": 18,
+    "bottom_pct": 30,
+    "stroke_px": 6,
+    "stroke_color": "#000000",
+    "shadow": "hard",
+    "colors": [
+      "#FFFFFF"
+    ],
+    "emphasis": "color",
+    "emphasis_layout": "inline",
+    "emphasis_color": "highlight",
+    "animation": "pop"
+  },
+  "hook": {
+    "enabled": true,
+    "duration_ms": 3000,
+    "center_pct": 63,
+    "size_pct": 12.5,
+    "kicker_ratio": 0.58,
+    "sub_ratio": 0.42,
+    "font": "display",
+    "big_font": "display",
+    "weight": 400,
+    "big_weight": 400,
+    "case": "upper",
+    "kicker_color": "highlight",
+    "big_color": "#FFFFFF",
+    "sub_color": "#FFFFFF",
+    "stroke_px": 7,
+    "stroke_color": "#000000",
+    "big_stroke_color": "highlight",
+    "shadow": "hard",
+    "animation": "pop",
+    "dim": 0
+  },
+  "cards": {
+    "kind": "sticker",
+    "hold_ms": 1800
+  },
+  "lower_third": false,
+  "transitions": [
+    "cut",
+    "whip",
+    "flash-bw",
+    "zoom"
+  ],
+  "ai_graphics": "Sticker ed elementi semplici e riconoscibili (prodotti, luoghi, emoji, loghi), colori pieni, ritagliati con bordo bianco spesso, ombra netta. Divertenti e immediati, niente look cinematografico.",
+  "sound": {
+    "density": "high",
+    "events": {
+      "caption": null,
+      "emphasis": "texture.pop",
+      "cut": "whoosh.short",
+      "punch": null,
+      "card_in": "texture.pop",
+      "hook": "hit.impact",
+      "flash": "texture.digital_camera_click",
+      "block": null
+    },
+    "voice_lufs": -14,
+    "relative_db": {
+      "textures": -17,
+      "whooshes": -16,
+      "risers": -14,
+      "hits": -16
+    },
+    "min_gap_ms": 1200,
+    "music": true,
+    "music_db": -20,
+    "emphasis_gap_ms": 6000
+  }
+}
