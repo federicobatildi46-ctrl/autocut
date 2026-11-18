@@ -1,5 +1,24 @@
 # autocut
 
+> **In English.** autocut is an automatic editing engine for long-form (horizontal) and
+> short-form (vertical) videos. It takes the raw camera footage (plus an optional screen
+> recording) and produces a `timeline.json`: sources, sync, word-level transcript, kept/removed
+> segments and repeated takes. No rendering, no styling: just the engine.
+>
+> - **Ingest**: score-based detection of camera vs. screen files from metadata (iPhone tags,
+>   OBS encoder, resolution, file names). Ambiguous cases stop and ask instead of guessing.
+> - **Transcription with [ElevenLabs Scribe](https://elevenlabs.io/speech-to-text)** (`scribe_v2`):
+>   word timestamps and audio events, cached by a fingerprint of file, range and request
+>   parameters, so the same audio is never transcribed (or paid for) twice.
+> - **Pause removal**: dead air is cut with per-profile thresholds and margins; audio events such
+>   as hesitations count as dead air, laughter does not.
+> - **Deterministic**: same files + same settings = same timeline. Raw files are read-only.
+>   Typed Pydantic models generate the JSON Schemas in `schemas/`.
+>
+> Stack: Python, uv, Typer, Pydantic, httpx, ffmpeg, pytest, ruff. Next steps: sync, repeated
+> takes, overrides, validation. The rest of this README is in Italian.
+
+
 Motore di montaggio automatico per video long-form (orizzontali) e short-form (verticali).
 Riceve il raw della camera (e opzionalmente la registrazione schermo) e produce un
 `timeline.json` con sorgenti, sincronizzazione, parole con i tempi, segmenti tenuti/tolti
